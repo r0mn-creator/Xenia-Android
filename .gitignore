@@ -1,0 +1,12 @@
+# Android build outputs
+android/android_studio_project/.gradle/
+android/android_studio_project/app/build/
+android/android_studio_project/app/.cxx/
+android/android_studio_project/local.properties
+
+# Compiled objects
+*.o
+*.a
+
+# Third-party submodule directories (each has its own git history)
+third_party/

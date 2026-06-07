@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature
+        android:name="android.hardware.vulkan.level"
+        android:required="true"
+        android:version="0" />
+
+    <uses-feature
+        android:name="android.hardware.vulkan.version"
+        android:required="true"
+        android:version="0x400000" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+
+    <application
+        android:name=".XeniaApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Xenia">
+
+        <activity
+            android:name="jp.xenia.emulator.LauncherActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            Primary entry point for external frontends (EmulationStation, ES-DE,
+            Lemuroid, file managers, etc.). Frontends can launch via:
+              1. ACTION_VIEW with a content:// or file:// URI pointing to a game
+              2. Explicit am-start with EXTRA_GAME_PATH string extra
+
+            singleTask ensures only one emulator instance runs at a time.
+            When the user exits, finish() returns naturally to the frontend.
+        -->
+        <activity
+            android:name="jp.xenia.emulator.EmulatorActivity"
+            android:exported="true"
+            android:label="@string/activity_label_emulator"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@style/Theme.Xenia">
+
+            <!-- Launched explicitly by our own LauncherActivity -->
+            <intent-filter>
+                <action android:name="android.intent.action.DEFAULT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+
+            <!-- ACTION_VIEW with content URI (file manager / ES-DE content picker) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="application/octet-stream" />
+            </intent-filter>
+
+            <!-- ACTION_VIEW with file URI — .iso disc images -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" android:mimeType="application/x-iso9660-image" />
+            </intent-filter>
+
+            <!-- ACTION_VIEW with file URI — .xex / .zar / .xbla (octet-stream fallback) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" android:mimeType="application/octet-stream" />
+            </intent-filter>
+
+        </activity>
+
+        <activity
+            android:name="jp.xenia.emulator.SettingsActivity"
+            android:exported="false"
+            android:label="Settings"
+            android:theme="@style/Theme.Xenia" />
+
+        <activity
+            android:name="jp.xenia.emulator.OnScreenControlsEditorActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@style/Theme.Xenia" />
+
+        <activity
+            android:name="jp.xenia.emulator.ButtonMappingActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Xenia" />
+
+        <activity
+            android:name="jp.xenia.emulator.GpuTraceViewerActivity"
+            android:exported="true"
+            android:label="@string/activity_label_gpu_trace_viewer"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@style/Theme.Xenia" />
+
+        <activity
+            android:name="jp.xenia.emulator.WindowDemoActivity"
+            android:exported="true"
+            android:label="@string/activity_label_window_demo"
+            android:theme="@style/Theme.Xenia" />
+
+    </application>
+
+</manifest>
