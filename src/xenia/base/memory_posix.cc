@@ -81,17 +81,48 @@ uint32_t ToPosixProtectFlags(PageAccess access) {
 
 bool IsWritableExecutableMemorySupported() { return true; }
 
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+
 void* AllocFixed(void* base_address, size_t length,
                  AllocationType allocation_type, PageAccess access) {
-  // mmap does not support reserve / commit, so ignore allocation_type.
+  // mmap does not support reserve / commit, so ignore allocation_type for the
+  // protection, but use it to decide whether we may replace existing mappings.
   uint32_t prot = ToPosixProtectFlags(access);
-  void* result = mmap(base_address, length, prot,
-                      MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+  int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+  if (base_address != nullptr) {
+    // IMPORTANT: a plain MAP_FIXED silently unmaps whatever is already at
+    // base_address. On Android that can clobber critical system mappings that
+    // happen to land in our preferred reservation ranges (e.g. ART's JIT code
+    // caches), corrupting the runtime. For an initial reservation we therefore
+    // use MAP_FIXED_NOREPLACE so the call fails (rather than overwriting) when
+    // the range is occupied, letting the caller fall back to a kernel-chosen
+    // address. Committing (re-mapping over our own prior reservation) still
+    // needs to replace, so it keeps MAP_FIXED.
+    // MAP_FIXED_NOREPLACE is only needed on Android, where ART's mappings can
+    // occupy our preferred reservation ranges. On desktop Linux the guest
+    // address space is free, and plain MAP_FIXED is the upstream behavior (the
+    // x64 code cache reserves fixed host addresses 0x80000000/0xA0000000 and
+    // relies on getting them).
+#if XE_PLATFORM_ANDROID
+    if (allocation_type == AllocationType::kReserve) {
+      flags |= MAP_FIXED_NOREPLACE;
+    } else {
+      flags |= MAP_FIXED;
+    }
+#else
+    flags |= MAP_FIXED;
+#endif
+  }
+  void* result = mmap(base_address, length, prot, flags, -1, 0);
   if (result == MAP_FAILED) {
     return nullptr;
-  } else {
-    return result;
   }
+  // With MAP_FIXED_NOREPLACE an old kernel may ignore the flag and place the
+  // mapping elsewhere; if we required the exact address the caller treats a
+  // mismatch as failure by checking the returned pointer.
+  return result;
 }
 
 bool DeallocFixed(void* base_address, size_t length,
@@ -183,9 +214,30 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
   // the Xbox 360 virtual/physical address aliasing (e.g. 0xA0000000 == phys
   // 0x00000000) actually works. MAP_FIXED ensures the mapping lands at the
   // requested address so virtual_membase_ + guest_addr always works.
-  void* result = mmap64(base_address, length, prot,
-                        MAP_SHARED | MAP_FIXED, handle, file_offset);
-  return result == MAP_FAILED ? nullptr : result;
+  // Use MAP_FIXED_NOREPLACE rather than MAP_FIXED so that probing candidate
+  // base addresses (Memory::MapViews tries 2^32, 2^33, ... until a whole set of
+  // views fits) does NOT clobber whatever already lives at the trial address.
+  // A plain MAP_FIXED there would silently destroy system mappings such as
+  // ART's JIT code caches, corrupting the runtime. If the kernel ignores the
+  // flag (pre-4.17) and places the view elsewhere, we reject it so the caller
+  // treats it as a failure and tries the next base.
+  int flags = MAP_SHARED;
+  if (base_address != nullptr) {
+#if XE_PLATFORM_ANDROID
+    flags |= MAP_FIXED_NOREPLACE;
+#else
+    flags |= MAP_FIXED;
+#endif
+  }
+  void* result = mmap64(base_address, length, prot, flags, handle, file_offset);
+  if (result == MAP_FAILED) {
+    return nullptr;
+  }
+  if (base_address != nullptr && result != base_address) {
+    munmap(result, length);
+    return nullptr;
+  }
+  return result;
 }
 
 bool UnmapFileView(FileMappingHandle handle, void* base_address,

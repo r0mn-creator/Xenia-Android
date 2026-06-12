@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-feature
         android:name="android.hardware.vulkan.level"
@@ -49,6 +50,7 @@
             android:label="@string/activity_label_emulator"
             android:launchMode="singleTask"
             android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density|fontScale|locale|layoutDirection|colorMode"
             android:theme="@style/Theme.Xenia">
 
             <!-- Launched explicitly by our own LauncherActivity -->
@@ -109,6 +111,16 @@
             android:exported="true"
             android:label="@string/activity_label_window_demo"
             android:theme="@style/Theme.Xenia" />
+
+        <!-- Disable androidx auto-started startup components (emoji2, etc.).
+             They are not needed by the emulator and their background font/
+             metadata-loading threads have been crashing under the heavy native
+             launch load. Removing the merged InitializationProvider entries
+             keeps those threads from ever running. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            tools:node="remove" />
 
     </application>
 

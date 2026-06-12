@@ -22,8 +22,7 @@ ifeq ($(filter-out ABI=$(TARGET_ARCH_ABI) $(PREMAKE_ANDROIDNDK_CONFIGURATIONS_PR
   LOCAL_C_INCLUDES := $(call PREMAKE_ANDROIDNDK_SHELL_ESCAPE,$(LOCAL_C_INCLUDES))
   LOCAL_MODULE_FILENAME := libxenia-hid-android
   LOCAL_SRC_FILES := \
-    ../src/xenia/hid/android/android_hid.cc \
-    ../src/xenia/hid/android/android_input_driver.cc
+    ../src/xenia/hid/android/android_hid.cc
   LOCAL_STATIC_LIBRARIES := \
     xenia-base \
     xenia-hid
@@ -47,8 +46,7 @@ else ifeq ($(filter-out ABI=$(TARGET_ARCH_ABI) $(PREMAKE_ANDROIDNDK_CONFIGURATIO
   LOCAL_C_INCLUDES := $(call PREMAKE_ANDROIDNDK_SHELL_ESCAPE,$(LOCAL_C_INCLUDES))
   LOCAL_MODULE_FILENAME := libxenia-hid-android
   LOCAL_SRC_FILES := \
-    ../src/xenia/hid/android/android_hid.cc \
-    ../src/xenia/hid/android/android_input_driver.cc
+    ../src/xenia/hid/android/android_hid.cc
   LOCAL_STATIC_LIBRARIES := \
     xenia-base \
     xenia-hid
@@ -72,8 +70,7 @@ else ifeq ($(filter-out ABI=$(TARGET_ARCH_ABI) $(PREMAKE_ANDROIDNDK_CONFIGURATIO
   LOCAL_C_INCLUDES := $(call PREMAKE_ANDROIDNDK_SHELL_ESCAPE,$(LOCAL_C_INCLUDES))
   LOCAL_MODULE_FILENAME := libxenia-hid-android
   LOCAL_SRC_FILES := \
-    ../src/xenia/hid/android/android_hid.cc \
-    ../src/xenia/hid/android/android_input_driver.cc
+    ../src/xenia/hid/android/android_hid.cc
   LOCAL_STATIC_LIBRARIES := \
     xenia-base \
     xenia-hid
@@ -100,8 +97,7 @@ else ifeq ($(filter-out ABI=$(TARGET_ARCH_ABI) $(PREMAKE_ANDROIDNDK_CONFIGURATIO
   LOCAL_C_INCLUDES := $(call PREMAKE_ANDROIDNDK_SHELL_ESCAPE,$(LOCAL_C_INCLUDES))
   LOCAL_MODULE_FILENAME := libxenia-hid-android
   LOCAL_SRC_FILES := \
-    ../src/xenia/hid/android/android_hid.cc \
-    ../src/xenia/hid/android/android_input_driver.cc
+    ../src/xenia/hid/android/android_hid.cc
   LOCAL_STATIC_LIBRARIES := \
     xenia-base \
     xenia-hid
@@ -129,8 +125,7 @@ else ifeq ($(filter-out ABI=$(TARGET_ARCH_ABI) $(PREMAKE_ANDROIDNDK_CONFIGURATIO
   LOCAL_C_INCLUDES := $(call PREMAKE_ANDROIDNDK_SHELL_ESCAPE,$(LOCAL_C_INCLUDES))
   LOCAL_MODULE_FILENAME := libxenia-hid-android
   LOCAL_SRC_FILES := \
-    ../src/xenia/hid/android/android_hid.cc \
-    ../src/xenia/hid/android/android_input_driver.cc
+    ../src/xenia/hid/android/android_hid.cc
   LOCAL_STATIC_LIBRARIES := \
     xenia-base \
     xenia-hid
@@ -158,8 +153,7 @@ else ifeq ($(filter-out ABI=$(TARGET_ARCH_ABI) $(PREMAKE_ANDROIDNDK_CONFIGURATIO
   LOCAL_C_INCLUDES := $(call PREMAKE_ANDROIDNDK_SHELL_ESCAPE,$(LOCAL_C_INCLUDES))
   LOCAL_MODULE_FILENAME := libxenia-hid-android
   LOCAL_SRC_FILES := \
-    ../src/xenia/hid/android/android_hid.cc \
-    ../src/xenia/hid/android/android_input_driver.cc
+    ../src/xenia/hid/android/android_hid.cc
   LOCAL_STATIC_LIBRARIES := \
     xenia-base \
     xenia-hid

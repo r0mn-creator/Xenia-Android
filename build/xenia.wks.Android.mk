@@ -62,6 +62,8 @@ include $(PREMAKE_ANDROIDNDK_WORKSPACE_DIR)/xenia-base.prj.Android.mk
 include $(PREMAKE_ANDROIDNDK_WORKSPACE_DIR)/xenia-cpu.prj.Android.mk
 include $(PREMAKE_ANDROIDNDK_WORKSPACE_DIR)/xenia-cpu-backend-x64.prj.Android.mk
 include $(PREMAKE_ANDROIDNDK_WORKSPACE_DIR)/xenia-cpu-backend-a64.prj.Android.mk
+include $(PREMAKE_ANDROIDNDK_WORKSPACE_DIR)/arm64emitter.prj.Android.mk
+include $(PREMAKE_ANDROIDNDK_WORKSPACE_DIR)/xenia-cpu-backend-arm64.prj.Android.mk
 include $(PREMAKE_ANDROIDNDK_WORKSPACE_DIR)/xenia-debug-ui.prj.Android.mk
 include $(PREMAKE_ANDROIDNDK_WORKSPACE_DIR)/xenia-gpu.prj.Android.mk
 include $(PREMAKE_ANDROIDNDK_WORKSPACE_DIR)/xenia-gpu-shader-compiler.prj.Android.mk

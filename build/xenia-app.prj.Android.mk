@@ -60,8 +60,9 @@ ifeq ($(filter-out ABI=$(TARGET_ARCH_ABI) $(PREMAKE_ANDROIDNDK_CONFIGURATIONS_PR
     mspack \
     snappy \
     xxhash \
-    xenia-cpu-backend-a64
+    arm64emitter
   LOCAL_WHOLE_STATIC_LIBRARIES := \
+    xenia-cpu-backend-arm64 \
     xenia-ui \
     xenia-gpu-vulkan-trace-viewer \
     xenia-hid-demo \
@@ -124,8 +125,9 @@ else ifeq ($(filter-out ABI=$(TARGET_ARCH_ABI) $(PREMAKE_ANDROIDNDK_CONFIGURATIO
     mspack \
     snappy \
     xxhash \
-    xenia-cpu-backend-a64
+    arm64emitter
   LOCAL_WHOLE_STATIC_LIBRARIES := \
+    xenia-cpu-backend-arm64 \
     xenia-ui \
     xenia-gpu-vulkan-trace-viewer \
     xenia-hid-demo \
@@ -188,8 +190,9 @@ else ifeq ($(filter-out ABI=$(TARGET_ARCH_ABI) $(PREMAKE_ANDROIDNDK_CONFIGURATIO
     mspack \
     snappy \
     xxhash \
-    xenia-cpu-backend-a64
+    arm64emitter
   LOCAL_WHOLE_STATIC_LIBRARIES := \
+    xenia-cpu-backend-arm64 \
     xenia-ui \
     xenia-gpu-vulkan-trace-viewer \
     xenia-hid-demo \

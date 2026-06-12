@@ -38,9 +38,11 @@
 
 // Available audio systems:
 #include "xenia/apu/nop/nop_audio_system.h"
-#if !XE_PLATFORM_ANDROID
+#if XE_PLATFORM_ANDROID
+#include "xenia/apu/aaudio/aaudio_audio_system.h"
+#else
 #include "xenia/apu/sdl/sdl_audio_system.h"
-#endif  // !XE_PLATFORM_ANDROID
+#endif  // XE_PLATFORM_ANDROID
 #if XE_PLATFORM_WIN32
 #include "xenia/apu/xaudio2/xaudio2_audio_system.h"
 #endif  // XE_PLATFORM_WIN32
@@ -272,9 +274,11 @@ std::unique_ptr<apu::AudioSystem> EmulatorApp::CreateAudioSystem(
 #if XE_PLATFORM_WIN32
   factory.Add<apu::xaudio2::XAudio2AudioSystem>("xaudio2");
 #endif  // XE_PLATFORM_WIN32
-#if !XE_PLATFORM_ANDROID
+#if XE_PLATFORM_ANDROID
+  factory.Add<apu::aaudio::AAudioAudioSystem>("aaudio");
+#else
   factory.Add<apu::sdl::SDLAudioSystem>("sdl");
-#endif  // !XE_PLATFORM_ANDROID
+#endif  // XE_PLATFORM_ANDROID
   factory.Add<apu::nop::NopAudioSystem>("nop");
   return factory.Create(cvars::apu, processor);
 }
@@ -539,7 +543,11 @@ void EmulatorApp::EmulatorThread() {
   // (unsupported system, memory issues, etc) this will fail early.
   // On Android/ARM64 there is no x64 JIT backend, so fall back to NullBackend.
   // Games won't execute PPC code but the rest of the infrastructure initializes.
-  constexpr bool kRequireCpuBackend = !XE_PLATFORM_ANDROID;
+#if XE_PLATFORM_ANDROID
+  constexpr bool kRequireCpuBackend = false;
+#else
+  constexpr bool kRequireCpuBackend = true;
+#endif
   X_STATUS result = emulator_->Setup(
       emulator_window_->window(), emulator_window_->imgui_drawer(),
       kRequireCpuBackend, CreateAudioSystem, CreateGraphicsSystem,
@@ -666,11 +674,20 @@ void EmulatorApp::EmulatorThread() {
   if (!path.empty()) {
     // Normalize the path and make absolute.
     auto abs_path = std::filesystem::absolute(path);
+#if XE_PLATFORM_ANDROID
+    // On Android, running LaunchPath on the UI thread via
+    // CallInUIThreadSynchronous blocks the main thread for several seconds
+    // (Vulkan, JIT, shader storage init) and triggers an ANR. Run it directly
+    // on the emulator thread instead; CompleteLaunch's UI operations are
+    // guarded with CallInUIThread where needed on Android.
+    result = emulator_->LaunchPath(abs_path);
+#else
     // CompleteLaunch (called by LaunchPath) asserts it's on the UI thread
     // because it touches window state and fires config callbacks.
     app_context().CallInUIThreadSynchronous([this, &abs_path, &result]() {
       result = emulator_->LaunchPath(abs_path);
     });
+#endif
     if (XFAILED(result)) {
       XELOGE("Failed to launch target: {:08X}", result);
       app_context().RequestDeferredQuit();

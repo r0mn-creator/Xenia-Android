@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Green palette -->
+    <color name="green_300">#81C784</color>
+    <color name="green_400">#66BB6A</color>
+    <color name="green_500">#4CAF50</color>
+    <color name="green_700">#388E3C</color>
+
+    <!-- Dark theme -->
+    <color name="dark_background">#121212</color>
+    <color name="dark_surface">#1E1E1E</color>
+    <color name="dark_surface_2">#2C2C2C</color>
+    <color name="dark_on_surface">#FFFFFFFF</color>
+
+    <!-- Light theme -->
+    <color name="light_background">#F5F5F5</color>
+    <color name="light_surface">#FFFFFF</color>
+    <color name="light_on_surface">#000000</color>
+
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+</resources>

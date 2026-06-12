@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="$PROJECT_DIR$/../.." vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/DirectX-Headers" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/FFmpeg" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/FidelityFX-CAS" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/FidelityFX-FSR" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/SPIRV-Tools" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/Vulkan-Headers" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/VulkanMemoryAllocator" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/aes_128" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/capstone" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/cpptoml" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/cxxopts" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/date" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/discord-rpc" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/disruptorplus" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/fmt" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/glslang" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/imgui" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/premake-androidndk" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/premake-cmake" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/premake-export-compile-commands" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/rapidjson" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/snappy" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/utfcpp" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/xbyak" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../third_party/xxhash" vcs="Git" />
+  </component>
+</project>

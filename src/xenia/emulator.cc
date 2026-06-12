@@ -10,7 +10,22 @@
 #include "xenia/emulator.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cinttypes>
+#include <thread>
+
+#include <cerrno>
+#include <csignal>
+#include <cstdlib>
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#include "xenia/cpu/function.h"
+#include "xenia/cpu/ppc/ppc_opcode_info.h"
+#include "xenia/base/string_buffer.h"
 
 #include "config.h"
 #include "third_party/fmt/include/fmt/format.h"
@@ -56,6 +71,7 @@
 #endif  // XE_ARCH_AMD64
 #if defined(__aarch64__)
 #include "xenia/cpu/backend/a64/a64_backend.h"
+#include "xenia/cpu/backend/arm64/arm64_backend.h"
 #endif
 
 DECLARE_int32(user_language);
@@ -70,9 +86,68 @@ DEFINE_string(
     "module.",
     "General");
 
+#if XE_ARCH_ARM64
+extern "C" uint32_t g_arm64_last_fn;
+extern "C" uint32_t g_arm64_last_fn_prev;
+extern "C" uint32_t g_arm64_ci_target;
+extern "C" uint32_t g_arm64_ci_saved;
+extern "C" uint32_t g_arm64_ci_matches;
+extern "C" uint32_t g_arm64_ci_misses;
+extern "C" uint32_t g_arm64_fn_ring[16];
+extern "C" uint32_t g_arm64_fn_ring_pos;
+extern "C" uint32_t g_store_watch_lo;
+extern "C" uint32_t g_store_watch_hi;
+struct XeStoreWatchEntry {
+  uint32_t addr;
+  uint32_t value;
+  uint32_t fn;
+  uint32_t seq;
+};
+extern "C" XeStoreWatchEntry g_store_watch_ring[128];
+extern "C" uint32_t g_store_watch_pos;
+extern "C" uint32_t g_fa88_caller_ring[8];
+extern "C" uint32_t g_fa88_r3_ring[8];
+extern "C" uint32_t g_fa88_r4_ring[8];
+extern "C" uint32_t g_fa88_pos;
+extern "C" uint32_t g_fbc8_r4, g_fbc8_r25, g_fbc8_r28, g_fbc8_r31;
+extern "C" uint32_t g_fbc8_storeval, g_fa88_local_ops;
+extern "C" uint32_t g_fbc8_xregs[7];
+#endif
+
 namespace xe {
 
 using namespace xe::literals;
+
+#if XE_PLATFORM_ANDROID
+// DIAGNOSTIC: signal-based PC sampler. The target thread (spinning in JIT code)
+// receives the signal; the handler records its host PC, which the watchdog maps
+// back to a guest function/address.
+static constexpr int kSampleSignal = SIGPROF;
+static std::atomic<uint64_t> g_sampled_pc{0};
+static std::atomic<uint64_t> g_sampled_lr{0};
+static std::atomic<uint64_t> g_sampled_frames[6];
+static std::atomic<int> g_sampled_nframes{0};
+static std::atomic<int> g_sample_ready{0};
+static void XeSampleSignalHandler(int, siginfo_t*, void* ucontext) {
+  auto* uc = reinterpret_cast<ucontext_t*>(ucontext);
+  uint64_t pc = 0, lr = 0;
+  int n = 0;
+#if XE_ARCH_ARM64
+  pc = static_cast<uint64_t>(uc->uc_mcontext.pc);
+  lr = static_cast<uint64_t>(uc->uc_mcontext.regs[30]);
+  // NOTE: do NOT walk the frame-pointer chain here — dereferencing a stale x29
+  // faults inside the handler, and since the access-violation handler doesn't
+  // resolve it the faulting load retries forever (a self-inflicted fault
+  // storm). pc + lr are read from the captured context and are always safe.
+#elif XE_ARCH_AMD64
+  pc = static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RIP]);
+#endif
+  g_sampled_pc.store(pc, std::memory_order_relaxed);
+  g_sampled_lr.store(lr, std::memory_order_relaxed);
+  g_sampled_nframes.store(n, std::memory_order_relaxed);
+  g_sample_ready.store(1, std::memory_order_release);
+}
+#endif
 
 Emulator::GameConfigLoadCallback::GameConfigLoadCallback(Emulator& emulator)
     : emulator_(emulator) {
@@ -183,9 +258,13 @@ X_STATUS Emulator::Setup(
 #endif  // XE_ARCH
     }
   }
-  // AArch64 JIT backend — used on Android arm64-v8a (Odin2, etc.)
-  // Inserted before the NullBackend fallback so Android builds get real JIT.
+  // AArch64 JIT backend — full HIR implementation using Dolphin's Arm64Emitter.
+  // Preferred over a64 (stub) on Android arm64-v8a.
 #if defined(__aarch64__)
+  if (!backend) {
+    backend.reset(new xe::cpu::backend::arm64::ARM64Backend());
+  }
+  // Fallback to stub a64 backend if arm64 fails to initialise.
   if (!backend) {
     backend.reset(new xe::cpu::backend::a64::A64Backend());
   }
@@ -572,7 +651,189 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   auto code_base = code_cache->execute_base_address();
   auto code_end = code_base + code_cache->total_size();
 
+#if XE_PLATFORM_ANDROID
+  // DIAGNOSTIC: rate-limited fault tracing to see what is faulting in a loop.
+  {
+    static std::atomic<uint64_t> s_exc_count{0};
+    uint64_t n = s_exc_count.fetch_add(1, std::memory_order_relaxed);
+    if ((n & 0x3FFF) == 0) {
+      bool in_guest = ex->pc() >= code_base && ex->pc() < code_end;
+      uint64_t lr = 0;
+#if XE_ARCH_ARM64
+      if (ex->thread_context()) lr = ex->thread_context()->x[30];
+      XELOGE("EXC last_fn={:08X} prev_fn={:08X}", g_arm64_last_fn,
+             g_arm64_last_fn_prev);
+      XELOGE(
+          "EXC ci_target={:08X} ci_saved={:08X} ci_matches={} ci_misses={}",
+          g_arm64_ci_target, g_arm64_ci_saved, g_arm64_ci_matches,
+          g_arm64_ci_misses);
+      // Dump the prolog ring buffer in chronological order (oldest first) to
+      // show the recursion cycle.
+      {
+        uint32_t pos = g_arm64_fn_ring_pos;
+        std::string ring;
+        for (uint32_t k = 0; k < 16; ++k) {
+          uint32_t idx = (pos + k) & 0xF;
+          char buf[12];
+          snprintf(buf, sizeof(buf), "%08X ", g_arm64_fn_ring[idx]);
+          ring += buf;
+        }
+        XELOGE("EXC fn_ring (oldest->newest): {}", ring);
+      }
+#endif
+      XELOGE(
+          "EXC#{} code={} pc={:016X} lr={:016X} fault_addr={:016X} in_guest={}",
+          n, static_cast<int>(ex->code()), ex->pc(), lr, ex->fault_address(),
+          in_guest ? 1 : 0);
+#if XE_ARCH_ARM64
+      // Store-watch dump FIRST (the fatal-signal handler is killed after ~24
+      // log lines, so the watched-write trace must print before the larger
+      // disasm dumps). Shows whether/with-what the watched guest range was
+      // written before the fault.
+      {
+        uint32_t total = g_store_watch_pos;
+        uint32_t count = total < 16 ? total : 16;
+        uint32_t startk = total < 16 ? 0 : total - 16;
+        XELOGE("EXC SW: {} writes to [{:08X},{:08X})", total, g_store_watch_lo,
+               g_store_watch_hi);
+        for (uint32_t k = 0; k < count; ++k) {
+          auto& sw = g_store_watch_ring[(startk + k) & 127];
+          XELOGE("EXC SW seq={} addr={:08X} val={:08X} pc={:08X}", sw.seq,
+                 sw.addr, sw.value, sw.fn);
+        }
+        // Read the ACTUAL guest memory at the watched fields right now, to tell
+        // a memory CORRUPTION (memory holds the bad value) from a LOAD bug
+        // (memory is fine but the lwz produced garbage). 0x82FE7800=size,
+        // 0x82FE7804=buffer ptr.
+        {
+          auto* xtm = kernel::XThread::GetCurrentThread();
+          auto* cm = xtm ? xtm->thread_state()->context() : nullptr;
+          if (cm) {
+            uint8_t* mb = reinterpret_cast<uint8_t*>(cm->virtual_membase);
+            uint32_t sz = xe::byte_swap(
+                *reinterpret_cast<const uint32_t*>(mb + 0x82FE7800));
+            uint32_t bp = xe::byte_swap(
+                *reinterpret_cast<const uint32_t*>(mb + 0x82FE7804));
+            uint32_t lc = xe::byte_swap(
+                *reinterpret_cast<const uint32_t*>(mb + 0x82FE73EC));
+            uint32_t gp = xe::byte_swap(
+                *reinterpret_cast<const uint32_t*>(mb + 0x82B9CE90));
+            XELOGE(
+                "EXC MEM [82FE7800](size)={:08X} [82FE7804](buf)={:08X} "
+                "[82FE73EC](loopN)={:08X} [82B9CE90](gobj)={:08X}",
+                sz, bp, lc, gp);
+          }
+        }
+        // Gated fn-entry ring (currently the [0x82B9CE90]-singleton DTOR body
+        // 0x82A4E578): who calls the destructor, on what object?
+        XELOGE("EXC DTOR entries={}", g_fa88_pos);
+        for (uint32_t k = 0; k < (g_fa88_pos < 8 ? g_fa88_pos : 8); ++k) {
+          XELOGE("EXC DTOR[{}] caller={:08X} r3={:08X} r4={:08X}", k,
+                 g_fa88_caller_ring[k], g_fa88_r3_ring[k], g_fa88_r4_ring[k]);
+        }
+        // Disassemble the guest init routine around the store-watch writer
+        // (the code that ZEROES the struct's buffer field) so we can see the
+        // allocation+store that should fill it but is being skipped. Anchored
+        // to the newest watched write's pc.
+        if (count > 0) {
+          auto* xt0 = kernel::XThread::GetCurrentThread();
+          auto* c0 = xt0 ? xt0->thread_state()->context() : nullptr;
+          uint32_t wpc = g_store_watch_ring[(startk + count - 1) & 127].fn;
+          if (c0 && wpc) {
+            uint8_t* mb = reinterpret_cast<uint8_t*>(c0->virtual_membase);
+            for (uint32_t a = wpc - 0x18; a <= wpc + 0x28; a += 4) {
+              uint32_t code =
+                  xe::byte_swap(*reinterpret_cast<const uint32_t*>(mb + a));
+              StringBuffer sb;
+              xe::cpu::ppc::DisasmPPC(a, code, &sb);
+              XELOGE("EXC I{} {:08X} {:08X} {}", a == wpc ? '>' : ' ', a, code,
+                     sb.to_string_view());
+            }
+          }
+        }
+      }
+      // Guest-side dump emitted HERE (before the host-stack walk and Pause(),
+      // which can hang on a faulting guest thread) so it always reaches the log:
+      // the guest PC, all 32 PPC GPRs (to see which pointer is 0), and the
+      // faulting guest instruction disassembled.
+      if (in_guest) {
+        auto* gf = code_cache->LookupFunction(ex->pc());
+        uint32_t gpc = gf ? gf->MapMachineCodeToGuestAddress(ex->pc()) : 0;
+        auto* xt = kernel::XThread::GetCurrentThread();
+        auto* ctx = xt ? xt->thread_state()->context() : nullptr;
+        XELOGE("EXC guest_pc={:08X} fn_start={:08X} (ctx={})", gpc,
+               gf ? static_cast<uint32_t>(gf->address()) : 0, ctx ? 1 : 0);
+        if (ctx) {
+          for (int r = 0; r < 32; r += 8)
+            XELOGE(
+                "  r{:<2}: {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} "
+                "{:08X}",
+                r, (uint32_t)ctx->r[r], (uint32_t)ctx->r[r + 1],
+                (uint32_t)ctx->r[r + 2], (uint32_t)ctx->r[r + 3],
+                (uint32_t)ctx->r[r + 4], (uint32_t)ctx->r[r + 5],
+                (uint32_t)ctx->r[r + 6], (uint32_t)ctx->r[r + 7]);
+          if (gpc) {
+            uint8_t* mb = reinterpret_cast<uint8_t*>(ctx->virtual_membase);
+            for (uint32_t a = gpc - 0x0C; a <= gpc + 0x0C; a += 4) {
+              uint32_t code =
+                  xe::byte_swap(*reinterpret_cast<const uint32_t*>(mb + a));
+              StringBuffer sb;
+              xe::cpu::ppc::DisasmPPC(a, code, &sb);
+              XELOGE("EXC G{} {:08X} {:08X} {}", a == gpc ? '>' : ' ', a, code,
+                     sb.to_string_view());
+            }
+          }
+          // Map the link register (the caller's return address) to a guest
+          // address and disassemble the caller's call site, to see how the
+          // (null) argument in r3 was set up before this call.
+          uint64_t hlr = ex->thread_context() ? ex->thread_context()->x[30] : 0;
+          auto* cf = (hlr >= code_base && hlr < code_end)
+                         ? code_cache->LookupFunction(hlr)
+                         : nullptr;
+          uint32_t clr = cf ? cf->MapMachineCodeToGuestAddress(hlr) : 0;
+          XELOGE("EXC caller lr_guest={:08X}", clr);
+          if (clr) {
+            uint8_t* mb = reinterpret_cast<uint8_t*>(ctx->virtual_membase);
+            for (uint32_t a = clr - 0x24; a <= clr + 0x04; a += 4) {
+              uint32_t code =
+                  xe::byte_swap(*reinterpret_cast<const uint32_t*>(mb + a));
+              StringBuffer sb;
+              xe::cpu::ppc::DisasmPPC(a, code, &sb);
+              XELOGE("EXC C{} {:08X} {:08X} {}", a == clr ? '>' : ' ', a, code,
+                     sb.to_string_view());
+            }
+          }
+        }
+      }
+#endif
+    }
+#if XE_ARCH_ARM64
+    // One-shot host-stack walk to find the Xenia caller of the faulting libc
+    // function. Guarded to run exactly once so a bad frame pointer can't create
+    // a fault storm.
+    static std::atomic<bool> s_walked{false};
+    if (ex->thread_context() && !s_walked.exchange(true)) {
+      uint64_t fp = ex->thread_context()->x[29];
+      std::string fr;
+      for (int i = 0; i < 8 && fp && (fp & 7) == 0; ++i) {
+        uint64_t ret = *reinterpret_cast<uint64_t*>(fp + 8);
+        uint64_t next = *reinterpret_cast<uint64_t*>(fp);
+        fr += fmt::format("{:012X} ", ret);
+        if (next <= fp) break;
+        fp = next;
+      }
+      XELOGE("EXC host stack: {}", fr);
+    }
+#endif
+  }
+  // IsDebuggerAttached() parses /proc/self/status on every call, which is
+  // catastrophically slow on the exception path. Cache it (a debugger
+  // attaching mid-run is not a case we need to handle live).
+  static const bool s_other_debugger_attached = debugging::IsDebuggerAttached();
+  if (!processor()->is_debugger_attached() && s_other_debugger_attached) {
+#else
   if (!processor()->is_debugger_attached() && debugging::IsDebuggerAttached()) {
+#endif
     // If Xenia's debugger isn't attached but another one is, pass it to that
     // debugger.
     return false;
@@ -595,9 +856,187 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   assert_not_null(current_thread);
 
   auto guest_function = code_cache->LookupFunction(ex->pc());
-  assert_not_null(guest_function);
-
   auto context = current_thread->thread_state()->context();
+
+  // DIAGNOSTIC: dump the faulting instruction words + register state for any
+  // in-guest fault so we can pinpoint a bad guest memory access. Log the guest
+  // PC if known. Kept lightweight and safe (no guest-memory reads, which could
+  // re-fault and kill the process).
+  {
+    const uint32_t* ip = reinterpret_cast<const uint32_t*>(ex->pc());
+    uint32_t guest_pc =
+        guest_function
+            ? guest_function->MapMachineCodeToGuestAddress(ex->pc())
+            : 0;
+    XELOGE(
+        "EXC GUESTFAULT host_pc={:016X} (offset {:08X}) guest_pc={:08X} "
+        "fault_addr={:016X} insn[-1..+1]={:08X} [{:08X}] {:08X}",
+        ex->pc(), static_cast<uint32_t>(ex->pc() - code_base), guest_pc,
+        ex->fault_address(), ip[-1], ip[0], ip[1]);
+    // Host (ARM64) instructions leading up to the fault — shows the actual EA
+    // computation (e.g. whether membase was added before an atomic LDAXR).
+    {
+      char hl[160]; int p = 0;
+      for (int k = -10; k <= 1; ++k)
+        p += snprintf(hl + p, sizeof(hl) - p, "%08X%s", ip[k],
+                      k == 0 ? "* " : " ");
+      XELOGE("EXC HOSTASM [{:08X}-]: {}",
+             static_cast<uint32_t>(ex->pc() - code_base) - 40, hl);
+    }
+    uint8_t* membase = reinterpret_cast<uint8_t*>(context->virtual_membase);
+#if XE_ARCH_ARM64
+    // Gated-function entry ring FIRST (the fatal-signal handler is killed after
+    // ~24 log lines): caller + r3/r4 args of the traced fn (0x829216D0), plus
+    // an ASCII peek at the most recent r4 (the search-path string) and r3.
+    {
+      XELOGE("EXC FA88 ring pos={}", g_fa88_pos);
+      for (int k = 0; k < 8; ++k) {
+        XELOGE("EXC FA88[{}] caller={:08X} r3={:08X} r4={:08X}", k,
+               g_fa88_caller_ring[k], g_fa88_r3_ring[k], g_fa88_r4_ring[k]);
+      }
+      auto peek_str = [&](const char* tag, uint32_t ga) {
+        if (!ga || ga >= 0xC0000000u) return;
+        char s[49];
+        const char* p = reinterpret_cast<const char*>(membase + ga);
+        int n = 0;
+        for (; n < 48; ++n) {
+          char c = p[n];
+          if (!c) break;
+          s[n] = (c >= 0x20 && c < 0x7F) ? c : '.';
+        }
+        s[n] = 0;
+        XELOGE("EXC FA88 last {} str @{:08X}: \"{}\"", tag, ga, s);
+      };
+      if (g_fa88_pos) {
+        uint32_t idx = (g_fa88_pos - 1) & 7;
+        peek_str("r4", g_fa88_r4_ring[idx]);
+        peek_str("r3", g_fa88_r3_ring[idx]);
+      }
+    }
+    // Store-watch dump (the watched-write trace must print early too).
+    {
+      uint32_t total = g_store_watch_pos;
+      uint32_t count = total < 16 ? total : 16;
+      uint32_t startk = total < 16 ? 0 : total - 16;
+      XELOGE("EXC SW: {} writes to [{:08X},{:08X})", total, g_store_watch_lo,
+             g_store_watch_hi);
+      for (uint32_t k = 0; k < count; ++k) {
+        auto& sw = g_store_watch_ring[(startk + k) & 127];
+        XELOGE("EXC SW seq={} addr={:08X} val={:08X} (bswap {:08X}) pc={:08X}",
+               sw.seq, sw.addr, sw.value, xe::byte_swap(sw.value), sw.fn);
+      }
+    }
+#endif
+    // Disassemble a window of the original guest PPC code around the faulting
+    // instruction. The XEX is mapped into guest memory, so we read the raw
+    // big-endian opcodes via the membase and decode with Xenia's PPC
+    // disassembler. A '>' marks the faulting instruction. Logged first so the
+    // register/heap dump below survives logd "chatty" throttling.
+    // Registers FIRST so all 32 survive logd "chatty" throttling.
+    for (int i = 0; i < 32; i += 4) {
+      XELOGE(" r{:<2}-{:<2} = {:016X} {:016X} {:016X} {:016X}", i, i + 3,
+             context->r[i], context->r[i + 1], context->r[i + 2],
+             context->r[i + 3]);
+    }
+    auto disasm_range = [&](const char* tag, uint32_t from, uint32_t to,
+                            uint32_t mark) {
+      for (uint32_t a = from; a <= to; a += 4) {
+        uint32_t code = xe::byte_swap(
+            *reinterpret_cast<const uint32_t*>(membase + a));
+        StringBuffer sb;
+        xe::cpu::ppc::DisasmPPC(a, code, &sb);
+        XELOGE("EXC {}{} {:08X}  {:08X}  {}", tag, a == mark ? ">" : " ", a,
+               code, sb.to_string_view());
+      }
+    };
+    if (guest_pc) {
+      disasm_range("", guest_pc - 0x34, guest_pc + 0x28, guest_pc);
+    }
+    // Dump a few guest pointers' target memory (bounds-checked to the 512 MiB
+    // guest space so a wild pointer can't re-fault) to inspect heap structures.
+    auto dump_guest = [&](const char* tag, uint32_t ga) {
+      if (ga == 0 || ga >= 0xC0000000u) {
+        XELOGE("EXC {} @{:08X}: <unmapped/null>", tag, ga);
+        return;
+      }
+      const uint32_t* w = reinterpret_cast<const uint32_t*>(membase + ga);
+      XELOGE("EXC {} @{:08X}: {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}", tag, ga,
+             xe::byte_swap(w[0]), xe::byte_swap(w[1]), xe::byte_swap(w[2]),
+             xe::byte_swap(w[3]), xe::byte_swap(w[4]), xe::byte_swap(w[5]));
+    };
+    uint32_t r3 = static_cast<uint32_t>(context->r[3]);
+    dump_guest("r3+00 ", r3);
+    dump_guest("r3+40 ", r3 + 0x40);
+    dump_guest("r3+58 ", r3 + 0x58);  // free-list head array near the bad index
+    dump_guest("r3+180", r3 + 0x180);
+    uint32_t r4 = static_cast<uint32_t>(context->r[4]);
+    // The chunk being freed = r4 - r8 (r8 is the block size added to reach the
+    // "next chunk"). Dump its header to inspect the size-class byte at +4.
+    dump_guest("chunk ", r4 - static_cast<uint32_t>(context->r[8]));
+    // Scan backward from the bad "next chunk" to find the real chunk header /
+    // boundary, to tell a size overshoot from a lost header-init store.
+    dump_guest("r4-80 ", r4 - 0x80);
+    dump_guest("r4-40 ", r4 - 0x40);
+    dump_guest("r4-20 ", r4 - 0x20);
+    dump_guest("r4-10 ", r4 - 0x10);
+    dump_guest("r4    ", r4);
+    dump_guest("r10   ", static_cast<uint32_t>(context->r[10]));
+    dump_guest("r9    ", static_cast<uint32_t>(context->r[9]));
+    // Generic: dump targets of the registers commonly involved in pointer-walk
+    // faults so any near-null deref can be traced without re-instrumenting.
+    dump_guest("r11   ", static_cast<uint32_t>(context->r[11]));
+    dump_guest("r28   ", static_cast<uint32_t>(context->r[28]));
+    dump_guest("r29   ", static_cast<uint32_t>(context->r[29]));
+    dump_guest("r30   ", static_cast<uint32_t>(context->r[30]));
+    dump_guest("r30-10", static_cast<uint32_t>(context->r[30]) - 0x10);
+    dump_guest("r31   ", static_cast<uint32_t>(context->r[31]));
+    // GROUND-TRUTH DIFF vs Windows Xenia: block 0x40000630 lands in the wrong
+    // free-list bucket. Windows chunk630 hdr = 00050063 00010000 (byte[+4]=0,
+    // bucket 0); ours puts it in bucket 1 (byte[+4]=1). Dump our copy to see the
+    // exact wrong field.
+    dump_guest("c630  ", 0x40000630);
+    dump_guest("c680  ", 0x40000680);
+    // Dump the store-watch ring (writes to the watched heap LIST_ENTRY range),
+    // in chronological order. value is shown both raw and byte-swapped (a guest
+    // pointer store is byte-swapped in memory).
+#if XE_ARCH_ARM64
+    {
+      uint32_t total = g_store_watch_pos;
+      uint32_t count = total < 128 ? total : 128;
+      uint32_t startk = total < 128 ? 0 : total - 128;
+      XELOGE("EXC FBC8 ctx-regs: r4={:08X} r25={:08X} r28={:08X} r31={:08X}",
+             g_fbc8_r4, g_fbc8_r25, g_fbc8_r28, g_fbc8_r31);
+      XELOGE("EXC FBC8 stored value={:08X}  FA88 local-spill ops={}",
+             g_fbc8_storeval, g_fa88_local_ops);
+      XELOGE("EXC FBC8 x21-x27 = {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
+             g_fbc8_xregs[0], g_fbc8_xregs[1], g_fbc8_xregs[2], g_fbc8_xregs[3],
+             g_fbc8_xregs[4], g_fbc8_xregs[5], g_fbc8_xregs[6]);
+      XELOGE("EXC store-watch: {} writes to [{:08X},{:08X})", total,
+             g_store_watch_lo, g_store_watch_hi);
+      for (uint32_t k = 0; k < count; ++k) {
+        auto& e = g_store_watch_ring[(startk + k) & 127];
+        XELOGE("EXC  SW seq={} addr={:08X} val={:08X} (bswap {:08X}) pc={:08X}",
+               e.seq, e.addr, e.value, xe::byte_swap(e.value), e.fn);
+      }
+      // Disassemble a window around the PC of the last write (the corrupting
+      // store) so we can see how the stored register was built.
+      if (count) {
+        uint32_t pc = g_store_watch_ring[(g_store_watch_pos - 1) & 127].fn;
+        if (pc) {
+          for (uint32_t a = pc - 0x20; a <= pc + 0x8; a += 4) {
+            uint32_t code = xe::byte_swap(
+                *reinterpret_cast<const uint32_t*>(membase + a));
+            StringBuffer sb;
+            xe::cpu::ppc::DisasmPPC(a, code, &sb);
+            XELOGE("EXC  SWdis {} {:08X}  {:08X}  {}", a == pc ? ">" : " ", a,
+                   code, sb.to_string_view());
+          }
+        }
+      }
+    }
+#endif
+    return false;
+  }
 
   XELOGE("==== CRASH DUMP ====");
   XELOGE("Thread ID (Host: 0x{:08X} / Guest: 0x{:08X})",
@@ -750,7 +1189,57 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                   const std::string_view module_path) {
   // Making changes to the UI (setting the icon) and executing game config load
   // callbacks which expect to be called from the UI thread.
+  // On Android, LaunchPath is called from the emulator thread to avoid blocking
+  // the UI thread; SetIcon calls are dispatched asynchronously below.
+#if !XE_PLATFORM_ANDROID
   assert_true(display_window_->app_context().IsInUIThread());
+#endif
+
+#if XE_PLATFORM_ANDROID
+  // DIAGNOSTIC watchdog: periodically dump the main guest thread's spin-loop
+  // registers (r8 = the looping byte, r10/r11 = the polled pointer state) so we
+  // can see what the boot code is stuck waiting on.
+  static std::atomic<bool> s_watchdog_started{false};
+  if (!s_watchdog_started.exchange(true)) {
+    // Install the sampling signal handler once.
+    struct sigaction sa = {};
+    sa.sa_sigaction = XeSampleSignalHandler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(kSampleSignal, &sa, nullptr);
+
+    std::thread([this]() {
+      // DIAGNOSTIC watchdog: tight-poll the XNotify registry head [0x921D00BC]
+      // (Flink/Blink) and log every transition with a monotonic iter counter.
+      // Reads via /proc/self/mem (pread) so an uncommitted guest page returns an
+      // error instead of faulting this thread. Discriminates "the head is
+      // momentarily 0 (a true race / late init)" from "the head is always valid
+      // and the guest load misreads it (a JIT load bug)".
+      uint8_t* mb = memory_ ? memory_->virtual_membase() : nullptr;
+      if (!mb) return;
+      int memfd = open("/proc/self/mem", O_RDONLY | O_CLOEXEC);
+      if (memfd < 0) return;
+      uint64_t addr = reinterpret_cast<uint64_t>(mb) + 0x921D00BC;
+      uint32_t last_f = 0xDEADBEEFu, last_b = 0xDEADBEEFu;
+      uint64_t iters = 0;
+      for (;;) {
+        uint32_t raw[2] = {0, 0};
+        if (pread64(memfd, raw, 8, static_cast<off_t>(addr)) == 8) {
+          uint32_t f = xe::byte_swap(raw[0]);
+          uint32_t b = xe::byte_swap(raw[1]);
+          if (f != last_f || b != last_b) {
+            XELOGE("WD 921D00BC Flink={:08X} Blink={:08X} (iter {})", f, b,
+                   iters);
+            last_f = f;
+            last_b = b;
+          }
+        }
+        ++iters;
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      }
+    }).detach();
+  }
+#endif
 
   // Setup NullDevices for raw HDD partition accesses
   // Cache/STFC code baked into games tries reading/writing to these
@@ -775,7 +1264,14 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   title_id_ = std::nullopt;
   title_name_ = "";
   title_version_ = "";
+#if XE_PLATFORM_ANDROID
+  {
+    auto* w = display_window_;
+    display_window_->app_context().CallInUIThread([w]() { w->SetIcon(nullptr, 0); });
+  }
+#else
   display_window_->SetIcon(nullptr, 0);
+#endif
 
   // Allow xam to request module loads.
   auto xam = kernel_state()->GetKernelModule<kernel::xam::XamModule>("xam.xex");
@@ -838,7 +1334,19 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
 
       auto icon_block = db.icon();
       if (icon_block) {
+#if XE_PLATFORM_ANDROID
+        // Copy buffer since icon_block lifetime ends when db goes out of scope.
+        std::vector<uint8_t> icon_copy(
+            static_cast<const uint8_t*>(icon_block.buffer),
+            static_cast<const uint8_t*>(icon_block.buffer) + icon_block.size);
+        auto* w = display_window_;
+        display_window_->app_context().CallInUIThread(
+            [w, ic = std::move(icon_copy)]() {
+              w->SetIcon(ic.data(), ic.size());
+            });
+#else
         display_window_->SetIcon(icon_block.buffer, icon_block.size);
+#endif
       }
     }
   }
