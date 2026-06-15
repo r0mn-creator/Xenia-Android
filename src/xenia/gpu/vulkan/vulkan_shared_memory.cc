@@ -453,7 +453,10 @@ void VulkanSharedMemory::GetUsageMasks(Usage usage,
   switch (usage) {
     case Usage::kComputeWrite:
       stage_mask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-      access_mask = VK_ACCESS_SHADER_READ_BIT;
+      // Must flush WRITE caches so the subsequent texture-load shader sees the
+      // data the resolve compute shader just wrote. SHADER_READ_BIT here is
+      // wrong (reads have nothing to flush) and leaves Adreno L2 stale.
+      access_mask = VK_ACCESS_SHADER_WRITE_BIT;
       return;
     case Usage::kTransferDestination:
       stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;

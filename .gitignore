@@ -8,5 +8,10 @@ android/android_studio_project/local.properties
 *.o
 *.a
 
+# Native build outputs (binaries, objects, make files)
+build/bin/
+build/obj/
+*.make
+
 # Third-party submodule directories (each has its own git history)
 third_party/

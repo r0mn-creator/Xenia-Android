@@ -278,7 +278,7 @@ static void ARM64SpinWatchdog() {
       uint32_t v = g_arm64_fn_ring[(pos - 1 - k) & 15];
       n += std::snprintf(ring + n, sizeof(ring) - n, "%08X ", v);
     }
-    XELOGE("SPINWATCH last_fn={:08X} prev={:08X} stuck_s={} ring(newest->old): {}",
+    if (same >= 2) XELOGE("SPINWATCH last_fn={:08X} prev={:08X} stuck_s={} ring(newest->old): {}",
            cur, g_arm64_last_fn_prev, same, ring);
     // While the main thread is wedged in the 0x826D16D8 spin-lock acquire, dump
     // the 12-entry guest lock table it spins on (0x82FF2C00..) so we can tell
@@ -1218,7 +1218,7 @@ void ARM64Emitter::EmitStoreWatch(ARM64Reg ea, ARM64Reg value32) {
   // Disabled by default: emitting a host call after every guest store massively
   // slows boot (widening the window for the environmental ART crash). Flip to
   // true to re-enable the store-watch trace.
-  static constexpr bool kStoreWatchEnabled = true;
+  static constexpr bool kStoreWatchEnabled = false;
   if (!kStoreWatchEnabled) return;
   // Record EVERY 32-bit store; XeStoreWatchRecord's runtime range filter narrows
   // to [g_store_watch_lo, g_store_watch_hi) (set to the watched address). Must run
