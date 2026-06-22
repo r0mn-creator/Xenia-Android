@@ -1,0 +1,76 @@
+// Xenia Android — app module.
+// App display name: "Xenia Android" (res/values/strings.xml app_name).
+// Build codename: "Falcon" (exposed as BuildConfig.BUILD_CODENAME, shown in About).
+apply plugin: 'com.android.application'
+
+android {
+    namespace 'jp.xenia.emulator'   // matches Canary's windowed-app JNI (Java_jp_xenia_emulator_*)
+    compileSdkVersion 34
+    ndkVersion '27.0.12077973'
+
+    defaultConfig {
+        applicationId 'org.xeniafalcon'
+        minSdkVersion 30            // a64 JIT + modern Vulkan
+        targetSdkVersion 34
+        versionCode 1
+        versionName '0.1'
+
+        // Build codename surfaced to the app (About screen / version string).
+        buildConfigField "String", "BUILD_CODENAME", "\"Falcon\""
+
+        externalNativeBuild {
+            cmake {
+                // arm64 only — the a64 JIT is the whole point.
+                // Optimize the engine (-O2): the gradle "debug" variant otherwise compiles
+                // the native engine at -O0, which runs the a64 JIT and GPU far too slowly
+                // (slow boot + choppy audio). We KEEP asserts (no -DNDEBUG) — disabling them
+                // shifted thread timing and exposed a startup race, and they're a useful
+                // safety net. cppFlags/cFlags are appended last, so -O2 wins over the -O0.
+                // -DNDEBUG: build like Xenia's desktop RELEASE — disables the debug
+                // assert_*/assert_always checks. With asserts ON, games SIGTRAP on
+                // debug-only checks that desktop release skips (e.g. GetNativeObject
+                // on an unregistered guest object pointer). The threading races that
+                // made NDEBUG unstable earlier are now fixed (patches #13, #15).
+                arguments "-DANDROID_STL=c++_shared"
+                cppFlags "-std=c++20", "-fexperimental-library", "-O2", "-DNDEBUG"
+                cFlags "-O2", "-DNDEBUG"
+                // Build ONLY our JNI lib (+ its linked engine libs). Without this, gradle
+                // builds every CMake target including Canary's desktop `xenia-app` executable,
+                // which drags in SDL/GTK (unavailable on Android). Restricting to our target
+                // excludes all desktop-only targets cleanly.
+                targets "xeniaapp"
+            }
+        }
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            debuggable true
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+}

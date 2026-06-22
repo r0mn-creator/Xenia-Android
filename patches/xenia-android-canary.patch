@@ -1,0 +1,1936 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 30febc4..21a2cb3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -64,6 +64,12 @@ if(WIN32)
+   set(XE_PLATFORM_NAME "Windows")
+ elseif(APPLE)
+   set(XE_PLATFORM_NAME "macOS")
++# XENIA-ANDROID: give Android its own platform name so it isn't bucketed as generic
++# "Linux" (it shares XE_PLATFORM_LINUX in platform.h, but build outputs/logs should say
++# "Android"). Additive branch; upstream's else()/Linux path is unchanged below.
++# Logged in docs/CANARY_PATCHES.md.
++elseif(ANDROID)
++  set(XE_PLATFORM_NAME "Android")
+ else()
+   set(XE_PLATFORM_NAME "Linux")
+ endif()
+diff --git a/cmake/XeniaHelpers.cmake b/cmake/XeniaHelpers.cmake
+index b712553..b697478 100644
+--- a/cmake/XeniaHelpers.cmake
++++ b/cmake/XeniaHelpers.cmake
+@@ -63,6 +63,17 @@ function(xe_platform_sources target base_path)
+     file(${glob_mode} _plat_sources      "${base_path}/*_win.h"
+       "${base_path}/*_win.cc"
+     )
++  # XENIA-ANDROID: Android isn't WIN32 and its CMAKE_SYSTEM_NAME is "Android" (not "Linux"),
++  # so without this branch NO platform sources would be compiled (breaking the build).
++  # Android = POSIX (bionic) + its own *_android windowing, but NOT the desktop Linux/X11/GTK
++  # sources. This branch is checked before the Linux one; the original Linux branch below is
++  # left exactly as upstream. Logged in docs/CANARY_PATCHES.md (patch #2).
++  elseif(ANDROID)
++    file(${glob_mode} _plat_sources      "${base_path}/*_posix.h"
++      "${base_path}/*_posix.cc"
++      "${base_path}/*_android.h"
++      "${base_path}/*_android.cc"
++    )
+   elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+     file(${glob_mode} _plat_sources      "${base_path}/*_posix.h"
+       "${base_path}/*_posix.cc"
+diff --git a/src/xenia/CMakeLists.txt b/src/xenia/CMakeLists.txt
+index e410c0e..00a550d 100644
+--- a/src/xenia/CMakeLists.txt
++++ b/src/xenia/CMakeLists.txt
+@@ -20,6 +20,10 @@ if(XE_TARGET_AARCH64)
+ endif()
+ add_subdirectory(apu)
+ add_subdirectory(apu/nop)
++# XENIA-ANDROID: AAudio output backend (Android only). Logged in CANARY_PATCHES.md (#11).
++if(ANDROID)
++  add_subdirectory(apu/aaudio)
++endif()
+ add_subdirectory(gpu)
+ add_subdirectory(gpu/null)
+ if(NOT APPLE)
+@@ -27,6 +31,10 @@ if(NOT APPLE)
+ endif()
+ add_subdirectory(hid)
+ add_subdirectory(hid/nop)
++# XENIA-ANDROID: Android input backend (Android only). Logged in CANARY_PATCHES.md (#14).
++if(ANDROID)
++  add_subdirectory(hid/android)
++endif()
+ add_subdirectory(hid/portal)
+ add_subdirectory(kernel)
+ add_subdirectory(patcher)
+diff --git a/src/xenia/app/xenia_main.cc b/src/xenia/app/xenia_main.cc
+index 2dbefb9..e3b1283 100644
+--- a/src/xenia/app/xenia_main.cc
++++ b/src/xenia/app/xenia_main.cc
+@@ -36,6 +36,10 @@
+ 
+ // Available audio systems:
+ #include "xenia/apu/nop/nop_audio_system.h"
++// XENIA-ANDROID: AAudio output backend (patch #12).
++#if XE_PLATFORM_ANDROID
++#include "xenia/apu/aaudio/aaudio_audio_system.h"
++#endif  // XE_PLATFORM_ANDROID
+ #if XE_PLATFORM_LINUX
+ #include "xenia/apu/alsa/alsa_audio_system.h"
+ #endif  // XE_PLATFORM_LINUX
+@@ -57,6 +61,10 @@
+ 
+ // Available input drivers:
+ #include "xenia/hid/nop/nop_hid.h"
++// XENIA-ANDROID: Android input backend (patch #14).
++#if XE_PLATFORM_ANDROID
++#include "xenia/hid/android/android_hid.h"
++#endif  // XE_PLATFORM_ANDROID
+ #if !XE_PLATFORM_ANDROID
+ #include "xenia/hid/sdl/sdl_hid.h"
+ #endif  // !XE_PLATFORM_ANDROID
+@@ -318,12 +326,20 @@ std::unique_ptr<apu::AudioSystem> EmulatorApp::CreateAudioSystem(
+ #if XE_PLATFORM_WIN32
+   factory.Add<apu::xaudio2::XAudio2AudioSystem>("xaudio2");
+ #endif  // XE_PLATFORM_WIN32
+-#if XE_PLATFORM_LINUX
++// XENIA-ANDROID: Android defines XE_PLATFORM_LINUX too, but has no ALSA. Exclude the ALSA
++// audio backend on Android (matches how the SDL backend just below is already guarded with
++// !XE_PLATFORM_ANDROID). Without this the ALSA symbols are undefined at link. Patch #8.
++#if XE_PLATFORM_LINUX && !XE_PLATFORM_ANDROID
+   factory.Add<apu::alsa::ALSAAudioSystem>("alsa");
+-#endif  // XE_PLATFORM_LINUX
++#endif  // XE_PLATFORM_LINUX && !XE_PLATFORM_ANDROID
+ #if !XE_PLATFORM_ANDROID
+   factory.Add<apu::sdl::SDLAudioSystem>("sdl");
+ #endif  // !XE_PLATFORM_ANDROID
++  // XENIA-ANDROID: AAudio added before nop so apu=any prefers real audio when
++  // libaaudio is available, falling back to nop otherwise. Patch #12.
++#if XE_PLATFORM_ANDROID
++  factory.Add<apu::aaudio::AAudioAudioSystem>("aaudio");
++#endif  // XE_PLATFORM_ANDROID
+   factory.Add<apu::nop::NopAudioSystem>("nop");
+   return factory.Create(cvars::apu, processor);
+ }
+@@ -448,6 +464,10 @@ std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
+         xe::hid::nop::Create(window, EmulatorWindow::kZOrderHidInput));
+   } else {
+     Factory<hid::InputDriver, ui::Window*, size_t> factory;
++    // XENIA-ANDROID: Android input backend (patch #14).
++#if XE_PLATFORM_ANDROID
++    factory.Add("android", xe::hid::android::Create);
++#endif  // XE_PLATFORM_ANDROID
+ #if XE_PLATFORM_WIN32
+     factory.Add("xinput", xe::hid::xinput::Create);
+ #endif  // XE_PLATFORM_WIN32
+@@ -530,10 +550,13 @@ bool EmulatorApp::OnInitialize() {
+   cache_root = std::filesystem::absolute(cache_root);
+   XELOGI("Host cache root: {}", cache_root);
+ 
+-  if (cvars::discord) {
+-    discord::DiscordPresence::Initialize();
+-    discord::DiscordPresence::NotPlaying();
+-  }
++  // XENIA-ANDROID: Discord rich presence is a desktop-only extra (and unavailable on
++  // Android); we keep only what's needed to play games. Commented out (not deleted) so it's
++  // easy to restore and easy to diff against upstream. Logged in CANARY_PATCHES.md (#9).
++  // if (cvars::discord) {
++  //   discord::DiscordPresence::Initialize();
++  //   discord::DiscordPresence::NotPlaying();
++  // }
+ 
+   // Create the emulator but don't initialize so we can setup the window.
+   emulator_ =
+@@ -560,9 +583,10 @@ bool EmulatorApp::OnInitialize() {
+ void EmulatorApp::OnDestroy() {
+   ShutdownEmulatorThreadFromUIThread();
+ 
+-  if (cvars::discord) {
+-    discord::DiscordPresence::Shutdown();
+-  }
++  // XENIA-ANDROID: Discord presence commented out — desktop extra (patch #9).
++  // if (cvars::discord) {
++  //   discord::DiscordPresence::Shutdown();
++  // }
+ 
+   Profiler::Dump();
+   // The profiler needs to shut down before the graphics context.
+@@ -690,28 +714,31 @@ void EmulatorApp::EmulatorThread() {
+ 
+   // Set a debug handler.
+   // This will respond to debugging requests so we can open the debug UI.
+-  if (cvars::debug) {
+-    emulator_->processor()->set_debug_listener_request_handler(
+-        [this](xe::cpu::Processor* processor) {
+-          if (debug_window_) {
+-            return debug_window_.get();
+-          }
+-          app_context().CallInUIThreadSynchronous([this]() {
+-            debug_window_ = xe::debug::ui::DebugWindow::Create(emulator_.get(),
+-                                                               app_context());
+-            debug_window_->window()->AddListener(
+-                &debug_window_closed_listener_);
+-          });
+-          // If failed to enqueue the UI thread call, this will just be null.
+-          return debug_window_.get();
+-        });
+-  }
++  // XENIA-ANDROID: the debug UI window is a desktop developer tool, not needed to play games
++  // (and xenia-debug-ui isn't built for Android). Commented out (not deleted). Patch #10.
++  // if (cvars::debug) {
++  //   emulator_->processor()->set_debug_listener_request_handler(
++  //       [this](xe::cpu::Processor* processor) {
++  //         if (debug_window_) {
++  //           return debug_window_.get();
++  //         }
++  //         app_context().CallInUIThreadSynchronous([this]() {
++  //           debug_window_ = xe::debug::ui::DebugWindow::Create(emulator_.get(),
++  //                                                              app_context());
++  //           debug_window_->window()->AddListener(
++  //               &debug_window_closed_listener_);
++  //         });
++  //         // If failed to enqueue the UI thread call, this will just be null.
++  //         return debug_window_.get();
++  //       });
++  // }
+ 
+   emulator_->on_launch.AddListener([&](auto title_id, const auto& game_title) {
+-    if (cvars::discord) {
+-      discord::DiscordPresence::PlayingTitle(
+-          game_title.empty() ? "Unknown Title" : std::string(game_title));
+-    }
++    // XENIA-ANDROID: Discord presence commented out — desktop extra (patch #9).
++    // if (cvars::discord) {
++    //   discord::DiscordPresence::PlayingTitle(
++    //       game_title.empty() ? "Unknown Title" : std::string(game_title));
++    // }
+     app_context().CallInUIThread([this]() { emulator_window_->UpdateTitle(); });
+     emulator_thread_event_->Set();
+   });
+@@ -728,9 +755,10 @@ void EmulatorApp::EmulatorThread() {
+   });
+ 
+   emulator_->on_terminate.AddListener([]() {
+-    if (cvars::discord) {
+-      discord::DiscordPresence::NotPlaying();
+-    }
++    // XENIA-ANDROID: Discord presence commented out — desktop extra (patch #9).
++    // if (cvars::discord) {
++    //   discord::DiscordPresence::NotPlaying();
++    // }
+   });
+ 
+   // Enable emulator input now that the emulator is properly loaded.
+diff --git a/src/xenia/apu/aaudio/CMakeLists.txt b/src/xenia/apu/aaudio/CMakeLists.txt
+new file mode 100644
+index 0000000..15965b3
+--- /dev/null
++++ b/src/xenia/apu/aaudio/CMakeLists.txt
+@@ -0,0 +1,6 @@
++# XENIA-ANDROID: AAudio output backend (Android only). libaaudio is dlopen'd at
++# runtime, so no extra link libraries are needed (dl is part of bionic libc).
++add_library(xenia-apu-aaudio STATIC)
++xe_platform_sources(xenia-apu-aaudio ${CMAKE_CURRENT_SOURCE_DIR})
++target_link_libraries(xenia-apu-aaudio PUBLIC xenia-base xenia-apu)
++xe_target_defaults(xenia-apu-aaudio)
+diff --git a/src/xenia/apu/aaudio/aaudio_audio_system.cc b/src/xenia/apu/aaudio/aaudio_audio_system.cc
+new file mode 100644
+index 0000000..876d0a2
+--- /dev/null
++++ b/src/xenia/apu/aaudio/aaudio_audio_system.cc
+@@ -0,0 +1,406 @@
++/**
++ ******************************************************************************
++ * Xenia : Xbox 360 Emulator Research Project                                 *
++ ******************************************************************************
++ * Copyright 2026 Xenia Developers. All rights reserved.                      *
++ * Released under the BSD license - see LICENSE in the root for more details. *
++ ******************************************************************************
++ */
++
++#include "xenia/apu/aaudio/aaudio_audio_system.h"
++
++#include <dlfcn.h>
++
++#include <algorithm>
++#include <cstring>
++#include <mutex>
++#include <queue>
++#include <stack>
++
++#include "xenia/apu/apu_flags.h"
++#include "xenia/apu/audio_driver.h"
++#include "xenia/apu/conversion.h"
++#include "xenia/base/assert.h"
++#include "xenia/base/logging.h"
++#include "xenia/base/threading.h"
++
++namespace xe {
++namespace apu {
++namespace aaudio {
++
++// ---------------------------------------------------------------------------
++// Minimal AAudio ABI surface, resolved at runtime with dlopen/dlsym so that
++// the build can keep APP_PLATFORM=android-24 (AAudio itself is API 26+).
++// Values mirror <aaudio/AAudio.h>.
++// ---------------------------------------------------------------------------
++namespace abi {
++
++typedef struct AAudioStreamStruct AAudioStream;
++typedef struct AAudioStreamBuilderStruct AAudioStreamBuilder;
++typedef int32_t aaudio_result_t;
++
++constexpr int32_t kDirectionOutput = 0;            // AAUDIO_DIRECTION_OUTPUT
++constexpr int32_t kFormatPcmFloat = 2;             // AAUDIO_FORMAT_PCM_FLOAT
++constexpr int32_t kPerformanceModeNone = 10;       // NONE (larger, safer buffer)
++constexpr int32_t kPerformanceModeLowLatency = 12; // LOW_LATENCY
++constexpr int32_t kCallbackResultContinue = 0;     // CALLBACK_RESULT_CONTINUE
++constexpr aaudio_result_t kOk = 0;                 // AAUDIO_OK
++
++typedef int32_t (*DataCallback)(AAudioStream* stream, void* user_data,
++                                void* audio_data, int32_t num_frames);
++
++struct Lib {
++  void* handle = nullptr;
++
++  aaudio_result_t (*createStreamBuilder)(AAudioStreamBuilder**) = nullptr;
++  void (*builderSetDirection)(AAudioStreamBuilder*, int32_t) = nullptr;
++  void (*builderSetFormat)(AAudioStreamBuilder*, int32_t) = nullptr;
++  void (*builderSetChannelCount)(AAudioStreamBuilder*, int32_t) = nullptr;
++  void (*builderSetSampleRate)(AAudioStreamBuilder*, int32_t) = nullptr;
++  void (*builderSetPerformanceMode)(AAudioStreamBuilder*, int32_t) = nullptr;
++  void (*builderSetDataCallback)(AAudioStreamBuilder*, DataCallback,
++                                 void*) = nullptr;
++  aaudio_result_t (*builderOpenStream)(AAudioStreamBuilder*,
++                                       AAudioStream**) = nullptr;
++  aaudio_result_t (*builderDelete)(AAudioStreamBuilder*) = nullptr;
++  aaudio_result_t (*streamRequestStart)(AAudioStream*) = nullptr;
++  aaudio_result_t (*streamRequestStop)(AAudioStream*) = nullptr;
++  aaudio_result_t (*streamClose)(AAudioStream*) = nullptr;
++  int32_t (*streamGetSampleRate)(AAudioStream*) = nullptr;
++  // Optional (for smoothness): larger buffers ride through emulator hitches.
++  void (*builderSetBufferCapacityInFrames)(AAudioStreamBuilder*, int32_t) =
++      nullptr;
++  int32_t (*streamGetFramesPerBurst)(AAudioStream*) = nullptr;
++  aaudio_result_t (*streamSetBufferSizeInFrames)(AAudioStream*, int32_t) =
++      nullptr;
++  int32_t (*streamGetXRunCount)(AAudioStream*) = nullptr;
++
++  // Opens libaaudio.so and resolves all required function pointers; idempotent.
++  bool Load() {
++    if (handle) {
++      return true;
++    }
++    handle = dlopen("libaaudio.so", RTLD_NOW | RTLD_LOCAL);
++    if (!handle) {
++      return false;
++    }
++    auto sym = [this](const char* name) { return dlsym(handle, name); };
++    createStreamBuilder = reinterpret_cast<decltype(createStreamBuilder)>(
++        sym("AAudio_createStreamBuilder"));
++    builderSetDirection = reinterpret_cast<decltype(builderSetDirection)>(
++        sym("AAudioStreamBuilder_setDirection"));
++    builderSetFormat = reinterpret_cast<decltype(builderSetFormat)>(
++        sym("AAudioStreamBuilder_setFormat"));
++    builderSetChannelCount =
++        reinterpret_cast<decltype(builderSetChannelCount)>(
++            sym("AAudioStreamBuilder_setChannelCount"));
++    builderSetSampleRate = reinterpret_cast<decltype(builderSetSampleRate)>(
++        sym("AAudioStreamBuilder_setSampleRate"));
++    builderSetPerformanceMode =
++        reinterpret_cast<decltype(builderSetPerformanceMode)>(
++            sym("AAudioStreamBuilder_setPerformanceMode"));
++    builderSetDataCallback =
++        reinterpret_cast<decltype(builderSetDataCallback)>(
++            sym("AAudioStreamBuilder_setDataCallback"));
++    builderOpenStream = reinterpret_cast<decltype(builderOpenStream)>(
++        sym("AAudioStreamBuilder_openStream"));
++    builderDelete = reinterpret_cast<decltype(builderDelete)>(
++        sym("AAudioStreamBuilder_delete"));
++    streamRequestStart = reinterpret_cast<decltype(streamRequestStart)>(
++        sym("AAudioStream_requestStart"));
++    streamRequestStop = reinterpret_cast<decltype(streamRequestStop)>(
++        sym("AAudioStream_requestStop"));
++    streamClose =
++        reinterpret_cast<decltype(streamClose)>(sym("AAudioStream_close"));
++    streamGetSampleRate = reinterpret_cast<decltype(streamGetSampleRate)>(
++        sym("AAudioStream_getSampleRate"));
++    // Optional buffer-tuning symbols (don't fail Load if missing).
++    builderSetBufferCapacityInFrames =
++        reinterpret_cast<decltype(builderSetBufferCapacityInFrames)>(
++            sym("AAudioStreamBuilder_setBufferCapacityInFrames"));
++    streamGetFramesPerBurst =
++        reinterpret_cast<decltype(streamGetFramesPerBurst)>(
++            sym("AAudioStream_getFramesPerBurst"));
++    streamSetBufferSizeInFrames =
++        reinterpret_cast<decltype(streamSetBufferSizeInFrames)>(
++            sym("AAudioStream_setBufferSizeInFrames"));
++    streamGetXRunCount = reinterpret_cast<decltype(streamGetXRunCount)>(
++        sym("AAudioStream_getXRunCount"));
++    if (!createStreamBuilder || !builderSetDirection || !builderSetFormat ||
++        !builderSetChannelCount || !builderSetSampleRate ||
++        !builderSetDataCallback || !builderOpenStream || !builderDelete ||
++        !streamRequestStart || !streamRequestStop || !streamClose) {
++      dlclose(handle);
++      handle = nullptr;
++      return false;
++    }
++    return true;
++  }
++};
++
++// Returns the process-wide singleton Lib, shared across all driver instances.
++Lib* GetLib() {
++  static Lib lib;
++  return &lib;
++}
++
++}  // namespace abi
++
++// ---------------------------------------------------------------------------
++// AAudioAudioDriver
++//
++// Frame semantics mirror sdl_audio_driver.cc: the guest submits frames of
++// 256 samples x 6 channels of sequential big-endian floats; we convert to
++// interleaved stereo at submit time, the AAudio callback drains the queue
++// (with partial reads, since AAudio chooses its own burst size), and the
++// client semaphore is released once per fully consumed frame.
++// ---------------------------------------------------------------------------
++class AAudioAudioDriver : public AudioDriver {
++ public:
++  static constexpr uint32_t kFrameFrequency = 48000;
++  static constexpr uint32_t kFrameChannels = 6;
++  static constexpr uint32_t kChannelSamples = 256;
++  static constexpr uint32_t kOutChannels = 2;
++  // Converted (stereo interleaved) floats per guest frame.
++  static constexpr uint32_t kOutFrameFloats = kChannelSamples * kOutChannels;
++
++  // XENIA-ANDROID: Canary's AudioDriver base takes no Memory* (it hands ready
++  // samples to SubmitFrame), unlike master. So we only keep the semaphore.
++  explicit AAudioAudioDriver(xe::threading::Semaphore* semaphore)
++      : semaphore_(semaphore) {}
++
++  ~AAudioAudioDriver() override { assert_true(!stream_); }
++
++  // Creates and starts the AAudio output stream; returns false on any failure.
++  bool Initialize() override {
++    auto* lib = abi::GetLib();
++    if (!lib->Load()) {
++      XELOGE("AAudioAudioDriver: libaaudio.so unavailable");
++      return false;
++    }
++
++    abi::AAudioStreamBuilder* builder = nullptr;
++    if (lib->createStreamBuilder(&builder) != abi::kOk || !builder) {
++      XELOGE("AAudioAudioDriver: AAudio_createStreamBuilder failed");
++      return false;
++    }
++    lib->builderSetDirection(builder, abi::kDirectionOutput);
++    lib->builderSetFormat(builder, abi::kFormatPcmFloat);
++    lib->builderSetChannelCount(builder, kOutChannels);
++    lib->builderSetSampleRate(builder, kFrameFrequency);
++    // NONE (not low-latency): the emulator produces audio frames with jitter
++    // (CPU spikes, JIT, disc I/O), so we favour a larger, underrun-resistant
++    // buffer over minimum latency. Low-latency mode caused choppy audio.
++    if (lib->builderSetPerformanceMode) {
++      lib->builderSetPerformanceMode(builder, abi::kPerformanceModeNone);
++    }
++    // Ask for a generous buffer capacity (~170ms @ 48kHz) to ride through hitches.
++    if (lib->builderSetBufferCapacityInFrames) {
++      lib->builderSetBufferCapacityInFrames(builder, 8192);
++    }
++    lib->builderSetDataCallback(builder, &AAudioAudioDriver::DataCallbackThunk,
++                                this);
++    abi::aaudio_result_t result = lib->builderOpenStream(builder, &stream_);
++    lib->builderDelete(builder);
++    if (result != abi::kOk || !stream_) {
++      XELOGE("AAudioAudioDriver: openStream failed: {}", result);
++      stream_ = nullptr;
++      return false;
++    }
++    // Set the buffer size (underrun trigger level) to several bursts so a late
++    // frame doesn't immediately starve the stream. ~8 bursts is a good balance.
++    if (lib->streamGetFramesPerBurst && lib->streamSetBufferSizeInFrames) {
++      int32_t burst = lib->streamGetFramesPerBurst(stream_);
++      if (burst > 0) {
++        lib->streamSetBufferSizeInFrames(stream_, burst * 8);
++      }
++    }
++    result = lib->streamRequestStart(stream_);
++    if (result != abi::kOk) {
++      XELOGE("AAudioAudioDriver: requestStart failed: {}", result);
++      lib->streamClose(stream_);
++      stream_ = nullptr;
++      return false;
++    }
++    int32_t rate = lib->streamGetSampleRate ? lib->streamGetSampleRate(stream_)
++                                            : kFrameFrequency;
++    XELOGI("AAudioAudioDriver: stream opened ({} Hz requested, {} actual)",
++           kFrameFrequency, rate);
++    return true;
++  }
++
++  // Stops and closes the AAudio stream, then frees all queued frame buffers.
++  void Shutdown() override {
++    if (stream_) {
++      auto* lib = abi::GetLib();
++      lib->streamRequestStop(stream_);
++      lib->streamClose(stream_);
++      stream_ = nullptr;
++    }
++    std::unique_lock<std::mutex> guard(frames_mutex_);
++    while (!frames_unused_.empty()) {
++      delete[] frames_unused_.top();
++      frames_unused_.pop();
++    }
++    while (!frames_queued_.empty()) {
++      delete[] frames_queued_.front();
++      frames_queued_.pop();
++    }
++  }
++
++  // XENIA-ANDROID: Canary hands us a ready host-float frame of
++  // kFrameChannels (6) interleaved samples (it already did the guest->host
++  // conversion that master's driver used to do). We down-mix 6ch interleaved to
++  // stereo by taking the front L/R channels and enqueue for the AAudio callback.
++  void SubmitFrame(float* samples) override {
++    float* output_frame;
++    {
++      std::unique_lock<std::mutex> guard(frames_mutex_);
++      if (frames_unused_.empty()) {
++        output_frame = new float[kOutFrameFloats];
++      } else {
++        output_frame = frames_unused_.top();
++        frames_unused_.pop();
++      }
++    }
++
++    if (cvars::mute || !samples) {
++      std::memset(output_frame, 0, kOutFrameFloats * sizeof(float));
++    } else {
++      // Canary hands us the RAW guest frame: kChannelSamples (256) samples x 6
++      // channels of SEQUENTIAL (planar) BIG-ENDIAN floats — the driver is
++      // responsible for conversion (the SDL driver does the same in its output
++      // path). Convert + down-mix to interleaved stereo little-endian. (My
++      // earlier hand-rolled interleaved/LE copy assumed the wrong format and
++      // produced static.)
++      conversion::sequential_6_BE_to_interleaved_2_LE(output_frame, samples,
++                                                      kChannelSamples);
++    }
++
++    {
++      std::unique_lock<std::mutex> guard(frames_mutex_);
++      frames_queued_.push(output_frame);
++    }
++  }
++
++  // XENIA-ANDROID: required by Canary's AudioDriver interface. AAudio handles
++  // its own pacing; pause/resume the stream, volume is applied by the OS mixer.
++  void Pause() override {
++    if (stream_) abi::GetLib()->streamRequestStop(stream_);
++  }
++  void Resume() override {
++    if (stream_) abi::GetLib()->streamRequestStart(stream_);
++  }
++  void SetVolume(float volume) override {}
++
++ private:
++  // Static trampoline registered with AAudio; forwards to the instance method.
++  static int32_t DataCallbackThunk(abi::AAudioStream* stream, void* user_data,
++                                   void* audio_data, int32_t num_frames) {
++    return static_cast<AAudioAudioDriver*>(user_data)->DataCallback(
++        static_cast<float*>(audio_data), num_frames);
++  }
++
++  // AAudio pull callback: drains queued stereo frames into `out`; releases the
++  // guest semaphore once per fully consumed 256-sample frame.
++  int32_t DataCallback(float* out, int32_t num_frames) {
++    size_t need = static_cast<size_t>(num_frames) * kOutChannels;
++    std::unique_lock<std::mutex> guard(frames_mutex_);
++
++    // Rate-limited diagnostics (kept very quiet — this fires ~hundreds of Hz).
++    uint32_t n = datacb_count_++;
++    if (n == 1) {
++      XELOGI("AAudio DataCallback running: num_frames={} queued={}", num_frames,
++             static_cast<int>(frames_queued_.size()));
++    }
++
++    while (need) {
++      if (frames_queued_.empty()) {
++        std::memset(out, 0, need * sizeof(float));
++        break;
++      }
++      float* front = frames_queued_.front();
++      size_t avail = kOutFrameFloats - read_offset_;
++      size_t take = std::min(avail, need);
++      std::memcpy(out, front + read_offset_, take * sizeof(float));
++      out += take;
++      read_offset_ += take;
++      need -= take;
++      if (read_offset_ == kOutFrameFloats) {
++        frames_queued_.pop();
++        frames_unused_.push(front);
++        read_offset_ = 0;
++        // One full guest frame consumed: let the game queue the next one.
++        semaphore_->Release(1, nullptr);
++        ++frames_consumed_;
++      }
++    }
++    return abi::kCallbackResultContinue;
++  }
++
++  xe::threading::Semaphore* semaphore_;
++  abi::AAudioStream* stream_ = nullptr;
++
++  std::mutex frames_mutex_;
++  std::queue<float*> frames_queued_;
++  std::stack<float*> frames_unused_;
++  size_t read_offset_ = 0;
++  uint32_t datacb_count_ = 0;
++  uint32_t frames_consumed_ = 0;
++};
++
++// ---------------------------------------------------------------------------
++// AAudioAudioSystem
++// ---------------------------------------------------------------------------
++
++// Returns true if libaaudio.so loaded successfully on this device.
++bool AAudioAudioSystem::IsAvailable() { return abi::GetLib()->Load(); }
++
++// Factory: constructs an AAudioAudioSystem wrapped in a unique_ptr.
++std::unique_ptr<AudioSystem> AAudioAudioSystem::Create(
++    cpu::Processor* processor) {
++  return std::make_unique<AAudioAudioSystem>(processor);
++}
++
++// Constructor: delegates initialization to the AudioSystem base class.
++AAudioAudioSystem::AAudioAudioSystem(cpu::Processor* processor)
++    : AudioSystem(processor) {}
++
++AAudioAudioSystem::~AAudioAudioSystem() = default;
++
++// Allocates an AAudioAudioDriver, runs Initialize(), and returns it via
++// out_driver on success or X_STATUS_UNSUCCESSFUL if the stream could not open.
++X_STATUS AAudioAudioSystem::CreateDriver(size_t index,
++                                         xe::threading::Semaphore* semaphore,
++                                         AudioDriver** out_driver) {
++  assert_not_null(out_driver);
++  auto driver = new AAudioAudioDriver(semaphore);
++  if (!driver->Initialize()) {
++    driver->Shutdown();
++    delete driver;
++    return X_STATUS_UNSUCCESSFUL;
++  }
++  *out_driver = driver;
++  return X_STATUS_SUCCESS;
++}
++
++// Canary's media-player path (not guest XAudio). Not supported yet -> nullptr.
++AudioDriver* AAudioAudioSystem::CreateDriver(xe::threading::Semaphore* semaphore,
++                                             uint32_t frequency,
++                                             uint32_t channels,
++                                             bool need_format_conversion) {
++  return nullptr;
++}
++
++// Shuts down and deletes a driver that was created by CreateDriver.
++void AAudioAudioSystem::DestroyDriver(AudioDriver* driver) {
++  assert_not_null(driver);
++  auto aaudio_driver = dynamic_cast<AAudioAudioDriver*>(driver);
++  assert_not_null(aaudio_driver);
++  aaudio_driver->Shutdown();
++  delete aaudio_driver;
++}
++
++}  // namespace aaudio
++}  // namespace apu
++}  // namespace xe
+diff --git a/src/xenia/apu/aaudio/aaudio_audio_system.h b/src/xenia/apu/aaudio/aaudio_audio_system.h
+new file mode 100644
+index 0000000..f79c610
+--- /dev/null
++++ b/src/xenia/apu/aaudio/aaudio_audio_system.h
+@@ -0,0 +1,52 @@
++/**
++ ******************************************************************************
++ * Xenia : Xbox 360 Emulator Research Project                                 *
++ ******************************************************************************
++ * Copyright 2026 Xenia Developers. All rights reserved.                      *
++ * Released under the BSD license - see LICENSE in the root for more details. *
++ ******************************************************************************
++ */
++
++#ifndef XENIA_APU_AAUDIO_AAUDIO_AUDIO_SYSTEM_H_
++#define XENIA_APU_AAUDIO_AAUDIO_AUDIO_SYSTEM_H_
++
++#include "xenia/apu/audio_system.h"
++
++namespace xe {
++namespace apu {
++namespace aaudio {
++
++// Audio output via the Android NDK AAudio C API (API level 26+).
++// The library is dlopen'd at runtime so the build can keep targeting
++// android-24; on devices without libaaudio.so IsAvailable()/driver
++// creation simply fails and the factory falls through to "nop".
++class AAudioAudioSystem : public AudioSystem {
++ public:
++  explicit AAudioAudioSystem(cpu::Processor* processor);
++  ~AAudioAudioSystem() override;
++
++  std::string name() const override { return "AAudio"; }
++
++  // Returns true if libaaudio.so is present and all required symbols resolved.
++  static bool IsAvailable();
++
++  // Factory: creates an AAudioAudioSystem wrapped in a unique_ptr.
++  static std::unique_ptr<AudioSystem> Create(cpu::Processor* processor);
++
++  // Allocates and starts an AAudio output driver for the given output slot.
++  X_STATUS CreateDriver(size_t index, xe::threading::Semaphore* semaphore,
++                        AudioDriver** out_driver) override;
++  // Canary added this 2nd overload (used by the media player, not by guest XAudio
++  // client registration). We don't support that path yet -> return nullptr.
++  AudioDriver* CreateDriver(xe::threading::Semaphore* semaphore,
++                            uint32_t frequency, uint32_t channels,
++                            bool need_format_conversion) override;
++  // Stops and frees a driver previously created by CreateDriver.
++  void DestroyDriver(AudioDriver* driver) override;
++};
++
++}  // namespace aaudio
++}  // namespace apu
++}  // namespace xe
++
++#endif  // XENIA_APU_AAUDIO_AAUDIO_AUDIO_SYSTEM_H_
+diff --git a/src/xenia/base/filesystem_posix.cc b/src/xenia/base/filesystem_posix.cc
+index 0a759f1..0d37847 100644
+--- a/src/xenia/base/filesystem_posix.cc
++++ b/src/xenia/base/filesystem_posix.cc
+@@ -270,6 +270,11 @@ std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
+   return std::move(result);
+ }
+ 
++// XENIA-ANDROID: filesystem_android.cc provides its own SetAttributes (Android storage
++// semantics), and our build compiles BOTH _posix and _android sources (CANARY_PATCHES #2),
++// so this posix definition must be excluded on Android to avoid a duplicate-symbol link
++// error. The original is preserved, just guarded. Logged in CANARY_PATCHES.md (patch #7).
++#if !XE_PLATFORM_ANDROID
+ bool SetAttributes(const std::filesystem::path& path, uint64_t attributes) {
+   struct stat st;
+   if (stat(path.c_str(), &st) != 0) {
+@@ -283,6 +288,7 @@ bool SetAttributes(const std::filesystem::path& path, uint64_t attributes) {
+   }
+   return chmod(path.c_str(), mode) == 0;
+ }
++#endif  // !XE_PLATFORM_ANDROID
+ 
+ }  // namespace filesystem
+ }  // namespace xe
+diff --git a/src/xenia/base/threading_posix.cc b/src/xenia/base/threading_posix.cc
+index 6c25417..498a391 100644
+--- a/src/xenia/base/threading_posix.cc
++++ b/src/xenia/base/threading_posix.cc
+@@ -196,6 +196,13 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
+ class PosixConditionBase {
+  public:
+   PosixConditionBase() {
++#if XE_PLATFORM_ANDROID
++    // XENIA-ANDROID: bionic does NOT implement robust mutexes (PTHREAD_MUTEX_ROBUST /
++    // pthread_mutex_consistent are glibc-only, at no API level). Robust mutexes guarded
++    // against a thread dying while holding the lock; with the a64 JIT that doesn't happen,
++    // so the default std::mutex is fine here. Canary's desktop robust setup is preserved in
++    // the #else below. Logged in docs/CANARY_PATCHES.md (patch #4).
++#else
+     // Initialize as robust mutex to handle thread termination gracefully
+     pthread_mutexattr_t attr;
+     pthread_mutexattr_init(&attr);
+@@ -206,6 +213,7 @@ class PosixConditionBase {
+     pthread_mutex_destroy(native_mutex);      // Destroy default mutex
+     pthread_mutex_init(native_mutex, &attr);  // Reinit as robust
+     pthread_mutexattr_destroy(&attr);
++#endif
+   }
+ 
+   virtual ~PosixConditionBase() = default;
+@@ -215,6 +223,10 @@ class PosixConditionBase {
+     bool executed;
+     auto predicate = [this] { return this->signaled(); };
+ 
++#if XE_PLATFORM_ANDROID
++    // XENIA-ANDROID: plain lock (bionic has no robust-mutex EOWNERDEAD recovery — patch #4).
++    std::unique_lock<std::mutex> lock(mutex_);
++#else
+     // Handle robust mutex locking
+     auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
+     int lock_result = pthread_mutex_lock(native_mutex);
+@@ -226,6 +238,7 @@ class PosixConditionBase {
+     }
+ 
+     std::unique_lock<std::mutex> lock(mutex_, std::adopt_lock);
++#endif
+ 
+     if (predicate()) {
+       executed = true;
+@@ -275,6 +288,16 @@ class PosixConditionBase {
+       bool all_locked = true;
+ 
+       for (size_t i = 0; i < handles.size(); ++i) {
++#if XE_PLATFORM_ANDROID
++        // XENIA-ANDROID: plain non-blocking lock (no robust EOWNERDEAD path — patch #4).
++        std::unique_lock<std::mutex> l(handles[i]->mutex_, std::try_to_lock);
++        if (l.owns_lock()) {
++          locks.emplace_back(std::move(l));
++        } else {
++          all_locked = false;
++          break;
++        }
++#else
+         // Try to lock, handling robust mutex EOWNERDEAD case
+         auto native_mutex =
+             static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
+@@ -292,6 +315,7 @@ class PosixConditionBase {
+           all_locked = false;
+           break;
+         }
++#endif
+       }
+ 
+       // If we couldn't acquire all locks, release what we have and retry
+@@ -691,7 +715,12 @@ class PosixCondition<Thread> final : public PosixConditionBase {
+   }
+ 
+ #if XE_PLATFORM_ANDROID
+-  void SetAndroidPreApi26Name(const std::string_view name) {
++  // XENIA-ANDROID: marked const. It is called from a const member context (the
++  // name-setter above) and only reads cached members / calls pthread, so it must
++  // be const or the Android build fails ("'this' has type const ... but function
++  // is not marked const"). Latent in upstream because upstream never compiles for
++  // Android. Logged in docs/CANARY_PATCHES.md (patch #3).
++  void SetAndroidPreApi26Name(const std::string_view name) const {
+     if (android_pthread_getname_np_) {
+       return;
+     }
+@@ -804,8 +833,22 @@ class PosixCondition<Thread> final : public PosixConditionBase {
+     sigval value{};
+     value.sival_ptr = this;
+ #if XE_PLATFORM_ANDROID
+-    sigqueue(pthread_gettid_np(thread_),
+-             GetSystemSignal(SignalType::kThreadUserCallback), value);
++    // XENIA-ANDROID: bionic has no pthread_sigqueue, and canary's fallback —
++    // sigqueue(pthread_gettid_np(thread_), ...) — is WRONG: sigqueue()'s first
++    // argument is a PID, so the signal is delivered to the PROCESS and handled
++    // by an arbitrary thread, not `thread_`. The kThreadUserCallback handler
++    // only runs the callback when the *receiving* thread is alertable, so on any
++    // other thread the alert is silently dropped and the target alertable thread
++    // (parked waiting to process queued APCs) never wakes — stalling async work
++    // and game progression. Fix: deliver to the SPECIFIC thread via the
++    // rt_tgsigqueueinfo syscall, which targets one tid and still carries the
++    // sival payload the handler reads. (Logged in CANARY_PATCHES.md, patch #15.)
++    siginfo_t si{};
++    si.si_signo = GetSystemSignal(SignalType::kThreadUserCallback);
++    si.si_code = SI_QUEUE;  // user-queued signal (negative code required by kernel)
++    si.si_value = value;
++    syscall(SYS_rt_tgsigqueueinfo, getpid(), pthread_gettid_np(thread_),
++            si.si_signo, &si);
+ #else
+     pthread_sigqueue(thread_, GetSystemSignal(SignalType::kThreadUserCallback),
+                      value);
+@@ -972,7 +1015,9 @@ class PosixCondition<Thread> final : public PosixConditionBase {
+   // Name accessible via name() on Android before API 26 which added
+   // pthread_getname_np.
+   mutable std::mutex android_pre_api_26_name_mutex_;
+-  char android_pre_api_26_name_[16];
++  // XENIA-ANDROID: mutable so the const SetAndroidPreApi26Name() (patch #3) can write this
++  // name cache. The accompanying mutex above is already mutable upstream.
++  mutable char android_pre_api_26_name_[16];
+ #endif
+ };
+ 
+@@ -1289,12 +1334,22 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
+     std::unique_lock lock(thread->handle_.state_mutex_);
+     thread->handle_.state_ =
+         create_suspended ? State::kSuspended : State::kRunning;
++    // XENIA-ANDROID: set suspend_count_ atomically with state_, BEFORE the
++    // notify_all that releases a parent thread blocked in WaitStarted(). The
++    // original set suspend_count_ in a *separate* locked block below; a parent
++    // Resume() (which does WaitStarted() then checks suspend_count_) could run
++    // in the gap, observe suspend_count_==0, early-return as a no-op, and leave
++    // this thread waiting forever (lost-wakeup). Symptom: the GPU Frame limiter
++    // thread never started on Android -> no vblank -> game spins. Patch #13.
++    if (create_suspended) {
++      thread->handle_.suspend_count_ = 1;
++    }
+     thread->handle_.state_signal_.notify_all();
+   }
+ 
+   if (create_suspended) {
+     std::unique_lock lock(thread->handle_.state_mutex_);
+-    thread->handle_.suspend_count_ = 1;
++    // suspend_count_ was already set to 1 above (atomically with state_).
+     thread->handle_.state_signal_.wait(
+         lock, [thread] { return thread->handle_.suspend_count_ == 0; });
+   }
+diff --git a/src/xenia/cpu/backend/a64/a64_emitter.cc b/src/xenia/cpu/backend/a64/a64_emitter.cc
+index 3e894db..cbfd084 100644
+--- a/src/xenia/cpu/backend/a64/a64_emitter.cc
++++ b/src/xenia/cpu/backend/a64/a64_emitter.cc
+@@ -362,7 +362,20 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
+   if (code_cache_->has_indirection_table()) {
+     // Load host code address from indirection table.
+     mov(w16, function->address());
+-    ldr(w9, ptr(x16, static_cast<uint32_t>(0)));
++    // XENIA-ANDROID: the indirection table may be relocated off 0x80000000 (the
++    // ART Java heap collides with it). Read table[guest_addr] = *(base_off +
++    // guest_addr), where base_off = host base - guest base. x16 (guest addr) is
++    // preserved for the resolve thunk; x17 is scratch (IP1). Patch #18.
++    const uint64_t ind_off =
++        uint64_t(code_cache_->indirection_table_base()) -
++        code_cache_->indirection_table_guest_base();
++    if (ind_off == 0) {
++      ldr(w9, ptr(x16, static_cast<uint32_t>(0)));
++    } else {
++      mov(x17, ind_off);
++      add(x17, x17, x16);
++      ldr(w9, ptr(x17, static_cast<uint32_t>(0)));
++    }
+   } else {
+     // Fallback: resolve at runtime.
+     mov(x0, x20);  // context
+@@ -405,8 +418,18 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
+   // Load host code address from indirection table.
+   if (code_cache_->has_indirection_table()) {
+     mov(w16, target_w);  // w16 = guest address (also used by resolve thunk)
+-    ldr(w9, ptr(x16, static_cast<uint32_t>(
+-                         0)));  // w9 = host code from indirection table
++    // XENIA-ANDROID: table may be relocated off 0x80000000 — see Call(). x16
++    // (guest addr) preserved for the resolve thunk; x17 scratch. Patch #18.
++    const uint64_t ind_off =
++        uint64_t(code_cache_->indirection_table_base()) -
++        code_cache_->indirection_table_guest_base();
++    if (ind_off == 0) {
++      ldr(w9, ptr(x16, static_cast<uint32_t>(0)));
++    } else {
++      mov(x17, ind_off);
++      add(x17, x17, x16);
++      ldr(w9, ptr(x17, static_cast<uint32_t>(0)));
++    }
+   } else {
+     // Fallback: resolve at runtime.
+     mov(w16, target_w);
+diff --git a/src/xenia/cpu/backend/code_cache_base.h b/src/xenia/cpu/backend/code_cache_base.h
+index 9477cc7..ca24c79 100644
+--- a/src/xenia/cpu/backend/code_cache_base.h
++++ b/src/xenia/cpu/backend/code_cache_base.h
+@@ -31,6 +31,12 @@
+ #include "xenia/cpu/backend/code_cache.h"
+ #include "xenia/cpu/function.h"
+ 
++// XENIA-ANDROID: defined by our app (early_reserve.cc); releases the low-memory
++// reservation that keeps ASLR out of the fixed code-cache ranges. Weak so other
++// platforms/builds that don't define it link cleanly (the call becomes a no-op).
++// Logged in docs/CANARY_PATCHES.md (patch #16).
++extern "C" __attribute__((weak)) void xe_android_release_lowmem_reservation();
++
+ namespace xe {
+ namespace cpu {
+ namespace backend {
+@@ -111,6 +117,17 @@ class CodeCacheBase : public CodeCache {
+ 
+   bool has_indirection_table() { return indirection_table_base_ != nullptr; }
+ 
++  // XENIA-ANDROID: actual host base of the indirection table (may be relocated
++  // off kIndirectionTableBase=0x80000000 on Android — see Initialize). The a64
++  // emitter adds (indirection_table_base() - kIndirectionTableBase) to the guest
++  // address when reading the table. Patch #18.
++  uintptr_t indirection_table_base() const {
++    return reinterpret_cast<uintptr_t>(indirection_table_base_);
++  }
++  static constexpr uintptr_t indirection_table_guest_base() {
++    return kIndirectionTableBase;
++  }
++
+   void set_indirection_default(uint32_t default_value) {
+     indirection_default_value_ = default_value;
+   }
+@@ -286,17 +303,47 @@ class CodeCacheBase : public CodeCache {
+   CodeCacheBase() = default;
+ 
+   bool Initialize() {
++    // XENIA-ANDROID: the fixed code-cache ranges (0x80000000 / 0xA0000000) are
++    // claimed at .so load by our app (early_reserve.cc) to keep ASLR-placed system
++    // libraries out of them, which otherwise intermittently broke the AllocFixed
++    // below (MAP_FIXED_NOREPLACE fails on an occupied range). Release that
++    // placeholder now, immediately before we allocate, so AllocFixed succeeds.
++    // Weak symbol: undefined (no-op) on non-Android builds. Logged as patch #16.
++    if (xe_android_release_lowmem_reservation) {
++      xe_android_release_lowmem_reservation();
++    }
+     indirection_table_base_ = reinterpret_cast<uint8_t*>(xe::memory::AllocFixed(
+         reinterpret_cast<void*>(kIndirectionTableBase), kIndirectionTableSize,
+         xe::memory::AllocationType::kReserve,
+         xe::memory::PageAccess::kReadWrite));
+     if (!indirection_table_base_) {
+-      XELOGE("Unable to allocate code cache indirection table");
+-      XELOGE(
+-          "This is likely because the {:X}-{:X} range is in use by some "
+-          "other system DLL",
+-          static_cast<uint64_t>(kIndirectionTableBase),
+-          kIndirectionTableBase + kIndirectionTableSize);
++      // XENIA-ANDROID: on Android the ART managed Java heap is frequently mapped
++      // across the fixed kIndirectionTableBase (0x80000000) — ASLR varies, so the
++      // fixed reservation above fails on most launches, which is fatal. The table
++      // does NOT actually have to live at 0x80000000: writes already index it as
++      // base + (guest_addr - kIndirectionTableBase), and the a64 emitter applies
++      // the matching (indirection_table_base() - kIndirectionTableBase) offset on
++      // reads. So relocate it to a high address that's clear of the Java heap and
++      // guest memory. 64-bit reads handle any base. Logged as patch #18.
++      XELOGW(
++          "Code-cache indirection table base {:X} unavailable (likely the ART "
++          "Java heap); relocating.",
++          static_cast<uint64_t>(kIndirectionTableBase));
++      for (uint64_t base : {uint64_t(0x280000000ull), uint64_t(0x380000000ull),
++                            uint64_t(0x480000000ull)}) {
++        indirection_table_base_ = reinterpret_cast<uint8_t*>(
++            xe::memory::AllocFixed(reinterpret_cast<void*>(base),
++                                   kIndirectionTableSize,
++                                   xe::memory::AllocationType::kReserve,
++                                   xe::memory::PageAccess::kReadWrite));
++        if (indirection_table_base_) {
++          XELOGI("Relocated code-cache indirection table to {:X}", base);
++          break;
++        }
++      }
++    }
++    if (!indirection_table_base_) {
++      XELOGE("Unable to allocate code cache indirection table (even relocated)");
+     }
+ 
+     file_name_ =
+diff --git a/src/xenia/gpu/command_processor.cc b/src/xenia/gpu/command_processor.cc
+index 940a9a4..279b99f 100644
+--- a/src/xenia/gpu/command_processor.cc
++++ b/src/xenia/gpu/command_processor.cc
+@@ -354,6 +354,15 @@ void CommandProcessor::WorkerThreadMain() {
+     }
+     assert_true(read_ptr_index_ != write_ptr_index);
+ 
++    // XENIA-ANDROID TEMP: count GPU command executions (is the guest submitting
++    // any GPU work at all, or stuck before rendering?).
++    {
++      static uint32_t exec_n = 0;
++      if (exec_n++ < 10 || (exec_n % 120) == 0) {
++        XELOGI("CP ExecutePrimaryBuffer #{}: read={:X} write={:X}", exec_n,
++               read_ptr_index_, write_ptr_index);
++      }
++    }
+     // Execute. Note that we handle wraparound transparently.
+     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
+ 
+diff --git a/src/xenia/gpu/pm4_command_processor_implement.h b/src/xenia/gpu/pm4_command_processor_implement.h
+index 8f8519f..ada2ad2 100644
+--- a/src/xenia/gpu/pm4_command_processor_implement.h
++++ b/src/xenia/gpu/pm4_command_processor_implement.h
+@@ -4,6 +4,9 @@
+ #define XE_ENABLE_PM4_DISASM 1
+ #endif
+ 
++// XENIA-ANDROID TEMP: deadlock diagnostic dump (defined in kernel/xobject.cc).
++extern "C" void XeDumpActiveWaits();
++
+ using namespace xe::gpu::xenos;
+ void COMMAND_PROCESSOR::ExecuteIndirectBuffer(uint32_t ptr,
+                                               uint32_t count) XE_RESTRICT {
+@@ -395,6 +398,25 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
+   uint32_t count = ((packet >> 16) & 0x3FFF) + 1;
+   auto data_start_offset = reader_.read_offset();
+ 
++  // XENIA-ANDROID TEMP: does the guest ever issue a DRAW? Counts draw packets vs
++  // total type-3 packets, and logs the first few opcodes seen.
++  {
++    static uint32_t s_total = 0, s_draw = 0;
++    if (opcode == PM4_DRAW_INDX || opcode == PM4_DRAW_INDX_2 ||
++        opcode == PM4_DRAW_INDX_BIN || opcode == PM4_DRAW_INDX_2_BIN) {
++      if (s_draw < 4) {
++        XELOGI("PM4: *** DRAW packet (opcode {:02X}) #{} ***", opcode, s_draw);
++      }
++      ++s_draw;
++    }
++    if ((++s_total % 10000) == 0) {
++      XELOGI("PM4 type-3: {} total packets, {} DRAW packets (last opcode {:02X})",
++             s_total, s_draw, opcode);
++      // XENIA-ANDROID TEMP: snapshot who's stuck waiting (deadlock diagnostic).
++      XeDumpActiveWaits();
++    }
++  }
++
+   if (COMMAND_PROCESSOR::GetCurrentRingReadCount() >=
+       count * sizeof(uint32_t)) {
+     // To handle nesting behavior when tracing we special case indirect buffers.
+diff --git a/src/xenia/gpu/vulkan/vulkan_command_processor.cc b/src/xenia/gpu/vulkan/vulkan_command_processor.cc
+index ce46a01..0f9774f 100644
+--- a/src/xenia/gpu/vulkan/vulkan_command_processor.cc
++++ b/src/xenia/gpu/vulkan/vulkan_command_processor.cc
+@@ -2315,7 +2315,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
+   const RegisterFile& regs = *register_file_;
+ 
+   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
++  // XENIA-ANDROID TEMP: trace why early draws bail (no shaders translate).
++  static uint32_t s_id_count = 0;
++  bool s_id_log = (s_id_count++ < 20);
++  if (s_id_log) {
++    XELOGI("IssueDraw #{}: edram_mode={} prim={} idx={}", s_id_count,
++           int(edram_mode), int(prim_type), index_count);
++  }
+   if (edram_mode == xenos::EdramMode::kCopy) {
++    if (s_id_log) XELOGI("  -> IssueCopy (resolve)");
+     // Special copy handling.
+     return IssueCopy();
+   }
+@@ -2328,6 +2336,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
+   // Vertex shader analysis.
+   auto vertex_shader = static_cast<VulkanShader*>(active_vertex_shader());
+   if (!vertex_shader) {
++    if (s_id_log) XELOGI("  -> BAIL: no vertex shader bound");
+     // Always need a vertex shader.
+     return false;
+   }
+@@ -2363,10 +2372,24 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
+     // Disabling pixel shader for this case is also required by the pipeline
+     // cache.
+     if (memexport_ranges_.empty()) {
++      if (s_id_log) {
++        XELOGI(
++            "  -> BAIL: no effect. surface_pitch={} vs_export_mode={} "
++            "polygonal={} cull_f={} cull_b={}",
++            uint32_t(regs.Get<reg::RB_SURFACE_INFO>().surface_pitch),
++            int(regs.Get<reg::SQ_PROGRAM_CNTL>().vs_export_mode),
++            primitive_polygonal,
++            int(regs.Get<reg::PA_SU_SC_MODE_CNTL>().cull_front),
++            int(regs.Get<reg::PA_SU_SC_MODE_CNTL>().cull_back));
++      }
+       // This draw has no effect.
+       return true;
+     }
+   }
++  if (s_id_log) {
++    XELOGI("  -> PROCEEDING to draw: pixel_shader={} raster_done=1",
++           pixel_shader != nullptr);
++  }
+   if (pixel_shader && pixel_shader->memexport_eM_written() != 0 &&
+       device_properties.fragmentStoresAndAtomics) {
+     draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
+diff --git a/src/xenia/hid/android/CMakeLists.txt b/src/xenia/hid/android/CMakeLists.txt
+new file mode 100644
+index 0000000..e1406a8
+--- /dev/null
++++ b/src/xenia/hid/android/CMakeLists.txt
+@@ -0,0 +1,8 @@
++# XENIA-ANDROID: Android input backend (Android only). Reports a single virtual
++# controller whose state is pushed from the Java UI via the
++# injectControllerInputNative JNI entry point. Uses NDK headers (android/input.h,
++# jni.h) — no extra link libs (the `android` lib is linked by the app target).
++add_library(xenia-hid-android STATIC)
++xe_platform_sources(xenia-hid-android ${CMAKE_CURRENT_SOURCE_DIR})
++target_link_libraries(xenia-hid-android PUBLIC xenia-base xenia-hid)
++xe_target_defaults(xenia-hid-android)
+diff --git a/src/xenia/hid/android/android_hid.cc b/src/xenia/hid/android/android_hid.cc
+new file mode 100644
+index 0000000..a3c83a0
+--- /dev/null
++++ b/src/xenia/hid/android/android_hid.cc
+@@ -0,0 +1,379 @@
++/**
++ ******************************************************************************
++ * Xenia : Xbox 360 Emulator Research Project                                 *
++ ******************************************************************************
++ * Copyright 2024 Xenia Developers. All rights reserved.                      *
++ * Released under the BSD license - see LICENSE in the root for more details. *
++ ******************************************************************************
++ */
++
++#include "xenia/base/platform.h"
++#include "xenia/hid/android/android_hid.h"
++
++#if XE_PLATFORM_ANDROID
++
++#include <android/input.h>
++#include <cmath>
++
++#include "xenia/base/logging.h"
++#include "xenia/hid/input.h"
++#include "xenia/ui/windowed_app_context_android.h"
++
++// AMOTION_EVENT_BUTTON_GAMEPAD_* were added in API 33 (Android 13).
++// Define fallback values so we compile against older API levels.
++#ifndef AMOTION_EVENT_BUTTON_GAMEPAD_A
++#define AMOTION_EVENT_BUTTON_GAMEPAD_A      0x00001000
++#define AMOTION_EVENT_BUTTON_GAMEPAD_B      0x00002000
++#define AMOTION_EVENT_BUTTON_GAMEPAD_X      0x00008000
++#define AMOTION_EVENT_BUTTON_GAMEPAD_Y      0x00010000
++#define AMOTION_EVENT_BUTTON_GAMEPAD_L1     0x00040000
++#define AMOTION_EVENT_BUTTON_GAMEPAD_R1     0x00080000
++#define AMOTION_EVENT_BUTTON_GAMEPAD_L2     0x00100000
++#define AMOTION_EVENT_BUTTON_GAMEPAD_R2     0x00200000
++#define AMOTION_EVENT_BUTTON_GAMEPAD_THUMBL 0x00400000
++#define AMOTION_EVENT_BUTTON_GAMEPAD_THUMBR 0x00800000
++#define AMOTION_EVENT_BUTTON_GAMEPAD_START  0x01000000
++#define AMOTION_EVENT_BUTTON_GAMEPAD_SELECT 0x02000000
++#define AMOTION_EVENT_BUTTON_GAMEPAD_MODE   0x04000000
++#endif
++
++namespace xe {
++namespace hid {
++namespace android {
++
++// Static singleton.
++AndroidInputDriver* AndroidInputDriver::instance_ = nullptr;
++
++// ── Java BTN_* bit positions (must match OnScreenControlsView.BTN_*) ─────────
++static constexpr int kJavaBtnA         = 1 << 0;
++static constexpr int kJavaBtnB         = 1 << 1;
++static constexpr int kJavaBtnX         = 1 << 2;
++static constexpr int kJavaBtnY         = 1 << 3;
++static constexpr int kJavaBtnLB        = 1 << 4;
++static constexpr int kJavaBtnRB        = 1 << 5;
++static constexpr int kJavaBtnStart     = 1 << 8;
++static constexpr int kJavaBtnBack      = 1 << 9;
++static constexpr int kJavaBtnGuide     = 1 << 10;
++static constexpr int kJavaBtnDpadUp    = 1 << 11;
++static constexpr int kJavaBtnDpadDown  = 1 << 12;
++static constexpr int kJavaBtnDpadLeft  = 1 << 13;
++static constexpr int kJavaBtnDpadRight = 1 << 14;
++static constexpr int kJavaBtnLS        = 1 << 15;
++static constexpr int kJavaBtnRS        = 1 << 16;
++
++static uint16_t JavaMaskToXInput(jint java_mask) {
++  uint16_t b = 0;
++  if (java_mask & kJavaBtnA)         b |= X_INPUT_GAMEPAD_A;
++  if (java_mask & kJavaBtnB)         b |= X_INPUT_GAMEPAD_B;
++  if (java_mask & kJavaBtnX)         b |= X_INPUT_GAMEPAD_X;
++  if (java_mask & kJavaBtnY)         b |= X_INPUT_GAMEPAD_Y;
++  if (java_mask & kJavaBtnLB)        b |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
++  if (java_mask & kJavaBtnRB)        b |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
++  if (java_mask & kJavaBtnStart)     b |= X_INPUT_GAMEPAD_START;
++  if (java_mask & kJavaBtnBack)      b |= X_INPUT_GAMEPAD_BACK;
++  if (java_mask & kJavaBtnGuide)     b |= X_INPUT_GAMEPAD_GUIDE;
++  if (java_mask & kJavaBtnDpadUp)    b |= X_INPUT_GAMEPAD_DPAD_UP;
++  if (java_mask & kJavaBtnDpadDown)  b |= X_INPUT_GAMEPAD_DPAD_DOWN;
++  if (java_mask & kJavaBtnDpadLeft)  b |= X_INPUT_GAMEPAD_DPAD_LEFT;
++  if (java_mask & kJavaBtnDpadRight) b |= X_INPUT_GAMEPAD_DPAD_RIGHT;
++  if (java_mask & kJavaBtnLS)        b |= X_INPUT_GAMEPAD_LEFT_THUMB;
++  if (java_mask & kJavaBtnRS)        b |= X_INPUT_GAMEPAD_RIGHT_THUMB;
++  return b;
++}
++
++static inline int16_t FloatAxisToInt16(jfloat v) {
++  float clamped = v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v);
++  return static_cast<int16_t>(clamped * 32767.0f);
++}
++
++static inline uint8_t FloatTriggerToUint8(jfloat v) {
++  float clamped = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
++  return static_cast<uint8_t>(clamped * 255.0f);
++}
++
++// ---------------------------------------------------------------------------
++
++std::unique_ptr<InputDriver> Create(xe::ui::Window* window,
++                                    size_t window_z_order) {
++  return std::make_unique<AndroidInputDriver>(window, window_z_order);
++}
++
++AndroidInputDriver::AndroidInputDriver(xe::ui::Window* window,
++                                       size_t window_z_order)
++    : InputDriver(window, window_z_order) {
++  instance_ = this;
++}
++
++AndroidInputDriver::~AndroidInputDriver() {
++  if (instance_ == this) {
++    instance_ = nullptr;
++  }
++}
++
++X_STATUS AndroidInputDriver::Setup() {
++  auto* ctx = dynamic_cast<xe::ui::AndroidWindowedAppContext*>(
++      &window()->app_context());
++  if (!ctx) {
++    XELOGE("AndroidInputDriver: window context is not Android");
++    return X_STATUS_UNSUCCESSFUL;
++  }
++
++  const auto& jni_ids = ctx->jni_ids();
++  get_axis_value_id_   = jni_ids.motion_event_get_axis_value;
++  get_button_state_id_ = jni_ids.motion_event_get_button_state;
++  get_action_id_       = jni_ids.motion_event_get_action;
++  get_source_id_       = jni_ids.motion_event_get_source;
++
++  XELOGI("AndroidInputDriver: initialized");
++  return X_STATUS_SUCCESS;
++}
++
++X_RESULT AndroidInputDriver::GetCapabilities(uint32_t user_index,
++                                              uint32_t flags,
++                                              X_INPUT_CAPABILITIES* out_caps) {
++  if (user_index != 0) return X_ERROR_DEVICE_NOT_CONNECTED;
++
++  out_caps->type     = 0x01;  // XINPUT_DEVTYPE_GAMEPAD
++  out_caps->sub_type = 0x01;  // XINPUT_DEVSUBTYPE_GAMEPAD
++  out_caps->flags    = X_INPUT_CAPS_FFB_SUPPORTED;
++  out_caps->gamepad.buttons        = uint16_t(
++      X_INPUT_GAMEPAD_DPAD_UP | X_INPUT_GAMEPAD_DPAD_DOWN |
++      X_INPUT_GAMEPAD_DPAD_LEFT | X_INPUT_GAMEPAD_DPAD_RIGHT |
++      X_INPUT_GAMEPAD_START | X_INPUT_GAMEPAD_BACK |
++      X_INPUT_GAMEPAD_LEFT_THUMB | X_INPUT_GAMEPAD_RIGHT_THUMB |
++      X_INPUT_GAMEPAD_LEFT_SHOULDER | X_INPUT_GAMEPAD_RIGHT_SHOULDER |
++      X_INPUT_GAMEPAD_GUIDE |
++      X_INPUT_GAMEPAD_A | X_INPUT_GAMEPAD_B |
++      X_INPUT_GAMEPAD_X | X_INPUT_GAMEPAD_Y);
++  out_caps->gamepad.left_trigger   = 0xFF;
++  out_caps->gamepad.right_trigger  = 0xFF;
++  out_caps->gamepad.thumb_lx       = int16_t(0x7FFF);
++  out_caps->gamepad.thumb_ly       = int16_t(0x7FFF);
++  out_caps->gamepad.thumb_rx       = int16_t(0x7FFF);
++  out_caps->gamepad.thumb_ry       = int16_t(0x7FFF);
++  out_caps->vibration.left_motor_speed  = 0xFFFF;
++  out_caps->vibration.right_motor_speed = 0xFFFF;
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT AndroidInputDriver::GetState(uint32_t user_index,
++                                       X_INPUT_STATE* out_state) {
++  if (user_index != 0) return X_ERROR_DEVICE_NOT_CONNECTED;
++
++  std::lock_guard<std::mutex> lock(state_mutex_);
++  out_state->packet_number = packet_number_.load();
++
++  // Merge physical gamepad state and on-screen virtual controller state.
++  out_state->gamepad.buttons =
++      physical_state_.buttons | onscreen_state_.buttons;
++  {  // XENIA-ANDROID TEMP: confirm the game polls input + sees our buttons.
++    static uint32_t gs_n = 0;
++    if ((gs_n++ % 600) == 0 || out_state->gamepad.buttons != 0) {
++      XELOGI("AndroidHID GetState #{} user={}: buttons=0x{:04X}", gs_n,
++             user_index, uint32_t(out_state->gamepad.buttons));
++    }
++  }
++  out_state->gamepad.left_trigger =
++      std::max(physical_state_.left_trigger, onscreen_state_.left_trigger);
++  out_state->gamepad.right_trigger =
++      std::max(physical_state_.right_trigger, onscreen_state_.right_trigger);
++
++  // Additive merge for thumbsticks, clamped to int16_t range.
++  auto clamp16 = [](int32_t v) -> int16_t {
++    return static_cast<int16_t>(std::max(-32767, std::min(32767, v)));
++  };
++  out_state->gamepad.thumb_lx = clamp16(
++      static_cast<int32_t>(physical_state_.thumb_lx) +
++      static_cast<int32_t>(onscreen_state_.thumb_lx));
++  out_state->gamepad.thumb_ly = clamp16(
++      static_cast<int32_t>(physical_state_.thumb_ly) +
++      static_cast<int32_t>(onscreen_state_.thumb_ly));
++  out_state->gamepad.thumb_rx = clamp16(
++      static_cast<int32_t>(physical_state_.thumb_rx) +
++      static_cast<int32_t>(onscreen_state_.thumb_rx));
++  out_state->gamepad.thumb_ry = clamp16(
++      static_cast<int32_t>(physical_state_.thumb_ry) +
++      static_cast<int32_t>(onscreen_state_.thumb_ry));
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT AndroidInputDriver::SetState(uint32_t user_index,
++                                       X_INPUT_VIBRATION* vibration) {
++  if (user_index != 0) return X_ERROR_DEVICE_NOT_CONNECTED;
++  // TODO: Implement haptic feedback via Vibrator API.
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT AndroidInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
++                                           X_INPUT_KEYSTROKE* out_keystroke) {
++  if (user_index != 0) return X_ERROR_DEVICE_NOT_CONNECTED;
++  return X_ERROR_EMPTY;
++}
++
++// ---------------------------------------------------------------------------
++// On-screen virtual controller (called from JNI)
++// ---------------------------------------------------------------------------
++
++void AndroidInputDriver::UpdateState(uint16_t xinput_buttons,
++                                     uint8_t left_trigger,
++                                     uint8_t right_trigger,
++                                     int16_t thumb_lx, int16_t thumb_ly,
++                                     int16_t thumb_rx, int16_t thumb_ry) {
++  std::lock_guard<std::mutex> lock(state_mutex_);
++  onscreen_state_.buttons       = xinput_buttons;
++  onscreen_state_.left_trigger  = left_trigger;
++  onscreen_state_.right_trigger = right_trigger;
++  onscreen_state_.thumb_lx      = thumb_lx;
++  onscreen_state_.thumb_ly      = thumb_ly;
++  onscreen_state_.thumb_rx      = thumb_rx;
++  onscreen_state_.thumb_ry      = thumb_ry;
++  packet_number_.fetch_add(1, std::memory_order_relaxed);
++  XELOGI("AndroidHID UpdateState: buttons=0x{:04X}", xinput_buttons);  // TEMP
++}
++
++// ---------------------------------------------------------------------------
++// Physical gamepad — MotionEvent processing
++// ---------------------------------------------------------------------------
++
++float AndroidInputDriver::GetAxis(JNIEnv* env, jobject event,
++                                   int32_t axis) const {
++  if (!get_axis_value_id_) return 0.0f;
++  return env->CallFloatMethod(event, get_axis_value_id_, axis, 0);
++}
++
++// static
++float AndroidInputDriver::ApplyDeadzone(float value, float deadzone) {
++  if (std::fabs(value) < deadzone) return 0.0f;
++  float sign = value > 0.0f ? 1.0f : -1.0f;
++  return sign * (std::fabs(value) - deadzone) / (1.0f - deadzone);
++}
++
++// static
++int16_t AndroidInputDriver::AxisToInt16(float value) {
++  value = std::max(-1.0f, std::min(1.0f, value));
++  return static_cast<int16_t>(value * 32767.0f);
++}
++
++bool AndroidInputDriver::OnMotionEvent(JNIEnv* env, jobject motion_event) {
++  if (!get_source_id_ || !get_action_id_) return false;
++
++  int32_t source = env->CallIntMethod(motion_event, get_source_id_);
++
++  bool is_gamepad =
++      (source & AINPUT_SOURCE_GAMEPAD) == AINPUT_SOURCE_GAMEPAD ||
++      (source & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK;
++  if (!is_gamepad) return false;
++
++  gamepad_connected_.store(true);
++
++  float lx  = ApplyDeadzone(GetAxis(env, motion_event, AMOTION_EVENT_AXIS_X));
++  float ly  = ApplyDeadzone(GetAxis(env, motion_event, AMOTION_EVENT_AXIS_Y));
++  float rx  = ApplyDeadzone(GetAxis(env, motion_event, AMOTION_EVENT_AXIS_Z));
++  float ry  = ApplyDeadzone(GetAxis(env, motion_event, AMOTION_EVENT_AXIS_RZ));
++  float lt  = GetAxis(env, motion_event, AMOTION_EVENT_AXIS_LTRIGGER);
++  float rt  = GetAxis(env, motion_event, AMOTION_EVENT_AXIS_RTRIGGER);
++  float hat_x = GetAxis(env, motion_event, AMOTION_EVENT_AXIS_HAT_X);
++  float hat_y = GetAxis(env, motion_event, AMOTION_EVENT_AXIS_HAT_Y);
++
++  // Read digital button state (available on API 33+; gracefully zero on older).
++  int32_t button_state = 0;
++  if (get_button_state_id_) {
++    button_state = env->CallIntMethod(motion_event, get_button_state_id_);
++  }
++
++  uint16_t buttons = 0;
++
++  // D-pad from hat axes.
++  if (hat_x < -0.5f) buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
++  if (hat_x >  0.5f) buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
++  if (hat_y < -0.5f) buttons |= X_INPUT_GAMEPAD_DPAD_UP;
++  if (hat_y >  0.5f) buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
++
++  // Face buttons from getButtonState() — API 33+ values, graceful on older.
++  if (button_state & AMOTION_EVENT_BUTTON_GAMEPAD_A) buttons |= X_INPUT_GAMEPAD_A;
++  if (button_state & AMOTION_EVENT_BUTTON_GAMEPAD_B) buttons |= X_INPUT_GAMEPAD_B;
++  if (button_state & AMOTION_EVENT_BUTTON_GAMEPAD_X) buttons |= X_INPUT_GAMEPAD_X;
++  if (button_state & AMOTION_EVENT_BUTTON_GAMEPAD_Y) buttons |= X_INPUT_GAMEPAD_Y;
++
++  if (button_state & AMOTION_EVENT_BUTTON_GAMEPAD_L1)     buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
++  if (button_state & AMOTION_EVENT_BUTTON_GAMEPAD_R1)     buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
++  if (button_state & AMOTION_EVENT_BUTTON_GAMEPAD_START)  buttons |= X_INPUT_GAMEPAD_START;
++  if (button_state & AMOTION_EVENT_BUTTON_GAMEPAD_SELECT) buttons |= X_INPUT_GAMEPAD_BACK;
++  if (button_state & AMOTION_EVENT_BUTTON_GAMEPAD_THUMBL) buttons |= X_INPUT_GAMEPAD_LEFT_THUMB;
++  if (button_state & AMOTION_EVENT_BUTTON_GAMEPAD_THUMBR) buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;
++
++  std::lock_guard<std::mutex> lock(state_mutex_);
++  physical_state_.buttons       = buttons;
++  physical_state_.left_trigger  = static_cast<uint8_t>(lt * 255.0f);
++  physical_state_.right_trigger = static_cast<uint8_t>(rt * 255.0f);
++  physical_state_.thumb_lx = AxisToInt16(lx);
++  physical_state_.thumb_ly = AxisToInt16(-ly);  // Android up = negative → invert
++  physical_state_.thumb_rx = AxisToInt16(rx);
++  physical_state_.thumb_ry = AxisToInt16(-ry);
++  packet_number_.fetch_add(1, std::memory_order_relaxed);
++
++  return true;
++}
++
++bool AndroidInputDriver::OnKeyEvent(int32_t key_code, int32_t action) {
++  bool pressed = (action == AKEY_EVENT_ACTION_DOWN);
++
++  uint16_t button = 0;
++  switch (key_code) {
++    case AKEYCODE_DPAD_UP:    button = X_INPUT_GAMEPAD_DPAD_UP;    break;
++    case AKEYCODE_DPAD_DOWN:  button = X_INPUT_GAMEPAD_DPAD_DOWN;  break;
++    case AKEYCODE_DPAD_LEFT:  button = X_INPUT_GAMEPAD_DPAD_LEFT;  break;
++    case AKEYCODE_DPAD_RIGHT: button = X_INPUT_GAMEPAD_DPAD_RIGHT; break;
++    case AKEYCODE_BUTTON_A:   button = X_INPUT_GAMEPAD_A;          break;
++    case AKEYCODE_BUTTON_B:   button = X_INPUT_GAMEPAD_B;          break;
++    case AKEYCODE_BUTTON_X:   button = X_INPUT_GAMEPAD_X;          break;
++    case AKEYCODE_BUTTON_Y:   button = X_INPUT_GAMEPAD_Y;          break;
++    case AKEYCODE_BUTTON_L1:  button = X_INPUT_GAMEPAD_LEFT_SHOULDER;  break;
++    case AKEYCODE_BUTTON_R1:  button = X_INPUT_GAMEPAD_RIGHT_SHOULDER; break;
++    case AKEYCODE_BUTTON_THUMBL: button = X_INPUT_GAMEPAD_LEFT_THUMB;  break;
++    case AKEYCODE_BUTTON_THUMBR: button = X_INPUT_GAMEPAD_RIGHT_THUMB; break;
++    case AKEYCODE_BUTTON_START:  button = X_INPUT_GAMEPAD_START; break;
++    case AKEYCODE_BUTTON_SELECT: button = X_INPUT_GAMEPAD_BACK;  break;
++    default: return false;
++  }
++
++  gamepad_connected_.store(true);
++  std::lock_guard<std::mutex> lock(state_mutex_);
++  if (pressed) {
++    physical_state_.buttons |= button;
++  } else {
++    physical_state_.buttons &= ~button;
++  }
++  packet_number_.fetch_add(1, std::memory_order_relaxed);
++  return true;
++}
++
++}  // namespace android
++}  // namespace hid
++}  // namespace xe
++
++#endif  // XE_PLATFORM_ANDROID
++
++// ── JNI entry point ───────────────────────────────────────────────────────────
++// Called by WindowedAppActivity.injectControllerInputNative() from the UI thread.
++#if XE_PLATFORM_ANDROID
++extern "C" JNIEXPORT void JNICALL
++Java_jp_xenia_emulator_WindowedAppActivity_injectControllerInputNative(
++    JNIEnv* /* env */, jobject /* thiz */, jint button_mask, jfloat left_x,
++    jfloat left_y, jfloat right_x, jfloat right_y, jfloat left_trigger,
++    jfloat right_trigger) {
++  using namespace xe::hid::android;
++  AndroidInputDriver* driver = AndroidInputDriver::GetInstance();
++  if (!driver) return;
++
++  uint16_t xinput_buttons = JavaMaskToXInput(button_mask);
++  uint8_t lt = FloatTriggerToUint8(left_trigger);
++  uint8_t rt = FloatTriggerToUint8(right_trigger);
++  int16_t lx = FloatAxisToInt16(left_x);
++  int16_t ly = FloatAxisToInt16(-left_y);  // Android Y down → invert for Xbox up
++  int16_t rx = FloatAxisToInt16(right_x);
++  int16_t ry = FloatAxisToInt16(-right_y);
++
++  driver->UpdateState(xinput_buttons, lt, rt, lx, ly, rx, ry);
++}
++#endif  // XE_PLATFORM_ANDROID
+diff --git a/src/xenia/hid/android/android_hid.h b/src/xenia/hid/android/android_hid.h
+new file mode 100644
+index 0000000..70004b0
+--- /dev/null
++++ b/src/xenia/hid/android/android_hid.h
+@@ -0,0 +1,114 @@
++/**
++ ******************************************************************************
++ * Xenia : Xbox 360 Emulator Research Project                                 *
++ ******************************************************************************
++ * Copyright 2024 Xenia Developers. All rights reserved.                      *
++ * Released under the BSD license - see LICENSE in the root for more details. *
++ ******************************************************************************
++ *
++ * AndroidInputDriver: Unified Android input driver handling both physical
++ * gamepads (via MotionEvent / KeyEvent) and the on-screen virtual controller
++ * (via JNI UpdateState calls from the Java UI layer).
++ *
++ * Physical gamepad state and on-screen state are merged in GetState():
++ *   buttons   = physical | onscreen  (OR — both sources active simultaneously)
++ *   triggers  = max(physical, onscreen)
++ *   thumbsticks = additive, clamped to int16 range
++ ******************************************************************************
++ */
++
++#ifndef XENIA_HID_ANDROID_ANDROID_HID_H_
++#define XENIA_HID_ANDROID_ANDROID_HID_H_
++
++#include "xenia/base/platform.h"
++
++#if XE_PLATFORM_ANDROID
++
++#include <android/input.h>
++#include <jni.h>
++#include <atomic>
++#include <memory>
++#include <mutex>
++
++#include "xenia/hid/input_driver.h"
++#include "xenia/hid/input.h"
++
++namespace xe {
++namespace hid {
++namespace android {
++
++// Creates the Android input driver. Called from xenia_main_android.cc.
++std::unique_ptr<InputDriver> Create(xe::ui::Window* window,
++                                    size_t window_z_order);
++
++class AndroidInputDriver : public InputDriver {
++ public:
++  AndroidInputDriver(xe::ui::Window* window, size_t window_z_order);
++  ~AndroidInputDriver() override;
++
++  X_STATUS Setup() override;
++
++  X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags,
++                            X_INPUT_CAPABILITIES* out_caps) override;
++  X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state) override;
++  X_RESULT SetState(uint32_t user_index,
++                    X_INPUT_VIBRATION* vibration) override;
++  X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
++                         X_INPUT_KEYSTROKE* out_keystroke) override;
++
++  // XENIA-ANDROID: Canary's InputDriver added this pure virtual (not in the
++  // xenia-master interface this driver was written against).
++  InputType GetInputType() const override { return InputType::Controller; }
++
++  // Called from JNI (UI thread) to push on-screen virtual controller state.
++  // xinput_buttons is already in X_INPUT_GAMEPAD_BUTTON bit format.
++  void UpdateState(uint16_t xinput_buttons, uint8_t left_trigger,
++                   uint8_t right_trigger, int16_t thumb_lx, int16_t thumb_ly,
++                   int16_t thumb_rx, int16_t thumb_ry);
++
++  // Called from the Java Activity via JNI when a MotionEvent arrives.
++  bool OnMotionEvent(JNIEnv* env, jobject motion_event);
++
++  // Called from the Java Activity when key events arrive.
++  bool OnKeyEvent(int32_t key_code, int32_t action);
++
++  // Singleton accessor for JNI callbacks.
++  static AndroidInputDriver* GetInstance() { return instance_; }
++
++ private:
++  float GetAxis(JNIEnv* env, jobject event, int32_t axis) const;
++  static int16_t AxisToInt16(float value);
++  static float ApplyDeadzone(float value, float deadzone = 0.15f);
++
++  struct ControllerState {
++    uint16_t buttons       = 0;
++    uint8_t  left_trigger  = 0;
++    uint8_t  right_trigger = 0;
++    int16_t  thumb_lx      = 0;
++    int16_t  thumb_ly      = 0;
++    int16_t  thumb_rx      = 0;
++    int16_t  thumb_ry      = 0;
++  };
++
++  std::mutex state_mutex_;
++  ControllerState physical_state_;   // from physical gamepad (MotionEvent/KeyEvent)
++  ControllerState onscreen_state_;   // from on-screen UI (JNI UpdateState)
++
++  std::atomic<uint32_t> packet_number_{0};
++  std::atomic<bool> gamepad_connected_{false};
++
++  // Cached JNI method IDs for MotionEvent (from AndroidWindowedAppContext).
++  jmethodID get_axis_value_id_   = nullptr;
++  jmethodID get_button_state_id_ = nullptr;
++  jmethodID get_action_id_       = nullptr;
++  jmethodID get_source_id_       = nullptr;
++
++  static AndroidInputDriver* instance_;
++};
++
++}  // namespace android
++}  // namespace hid
++}  // namespace xe
++
++#endif  // XE_PLATFORM_ANDROID
++#endif  // XENIA_HID_ANDROID_ANDROID_HID_H_
+diff --git a/src/xenia/kernel/xam/profile_manager.cc b/src/xenia/kernel/xam/profile_manager.cc
+index 33bb264..e416698 100644
+--- a/src/xenia/kernel/xam/profile_manager.cc
++++ b/src/xenia/kernel/xam/profile_manager.cc
+@@ -105,6 +105,18 @@ ProfileManager::ProfileManager(KernelState* kernel_state,
+     LoadAccount(account_xuid);
+   }
+ 
++  // XENIA-ANDROID: guarantee at least one profile always exists and is signed in.
++  // Xenia only ever signs a profile in LOCALLY (offline — signin_state() always
++  // returns SignedInLocally; it never connects to Xbox Live), but MANY Live-aware
++  // games (Halo, etc.) park at boot until they see a signed-in user. If there are
++  // no profiles yet (first launch, or the user deleted them all), create a default
++  // "Jimmy" and auto-login it. This also backstops the "there must always be at
++  // least one profile" rule from the UI. Logged in CANARY_PATCHES.md (patch #17).
++  if (accounts_.empty()) {
++    XELOGI("XENIA-ANDROID: no profiles found — creating default 'Jimmy'");
++    CreateProfile("Jimmy", /*autologin=*/true, /*default_xuid=*/true);
++  }
++
+   if (!cvars::logged_profile_slot_0_xuid.empty()) {
+     Login(xe::string_util::from_string<uint64_t>(
+               cvars::logged_profile_slot_0_xuid, true),
+diff --git a/src/xenia/kernel/xboxkrnl/xboxkrnl_threading.cc b/src/xenia/kernel/xboxkrnl/xboxkrnl_threading.cc
+index e63a28d..51e1492 100644
+--- a/src/xenia/kernel/xboxkrnl/xboxkrnl_threading.cc
++++ b/src/xenia/kernel/xboxkrnl/xboxkrnl_threading.cc
+@@ -1060,6 +1060,15 @@ dword_result_t KeWaitForMultipleObjects_entry(
+       auto object_ref = XObject::GetNativeObject<XObject>(kernel_state(),
+                                                           object_ptr, -1, true);
+       if (!object_ref) {
++        // XENIA-ANDROID TEMP: the game's wait fails because one object can't be
++        // resolved — this is likely the stuck-loop cause. Log which guest object.
++        static uint32_t s_wf = 0;
++        if (s_wf++ < 12) {
++          XELOGW(
++              "KeWaitForMultipleObjects: BAIL INVALID_PARAMETER — object {} of "
++              "{} at guest {:08X} not resolvable (game wait fails -> may loop)",
++              n, uint32_t(count), uint32_t(objects_ptr[n]));
++        }
+         return X_STATUS_INVALID_PARAMETER;
+       }
+ 
+diff --git a/src/xenia/kernel/xboxkrnl/xboxkrnl_video.cc b/src/xenia/kernel/xboxkrnl/xboxkrnl_video.cc
+index f4da2c2..5bd4dd0 100644
+--- a/src/xenia/kernel/xboxkrnl/xboxkrnl_video.cc
++++ b/src/xenia/kernel/xboxkrnl/xboxkrnl_video.cc
+@@ -472,6 +472,14 @@ void VdSwap_entry(
+     lpdword_t frontbuffer_ptr,  // ptr to frontbuffer address
+     lpdword_t texture_format_ptr, lpdword_t color_space_ptr, lpdword_t width,
+     lpdword_t height) {
++  // XENIA-ANDROID TEMP: confirm whether the guest ever tries to present a frame.
++  {
++    static uint32_t vdswap_n = 0;
++    if (vdswap_n++ < 10 || (vdswap_n % 60) == 0) {
++      XELOGI("VdSwap #{}: {}x{} fmt-ptr present", vdswap_n,
++             width ? uint32_t(*width) : 0, height ? uint32_t(*height) : 0);
++    }
++  }
+   // All of these parameters are REQUIRED.
+   assert(buffer_ptr);
+   assert(fetch_ptr);
+diff --git a/src/xenia/kernel/xobject.cc b/src/xenia/kernel/xobject.cc
+index 3c50150..e29670b 100644
+--- a/src/xenia/kernel/xobject.cc
++++ b/src/xenia/kernel/xobject.cc
+@@ -7,6 +7,7 @@
+  ******************************************************************************
+  */
+ 
++#include <chrono>
+ #include "xenia/kernel/xobject.h"
+ 
+ #include "xenia/base/byte_stream.h"
+@@ -24,6 +25,59 @@
+ #include "xenia/kernel/xthread.h"
+ #include "xenia/xbox.h"
+ 
++// XENIA-ANDROID TEMP: deadlock diagnostic. Tracks each guest thread's CURRENT
++// wait (set on XObject::Wait entry, cleared on exit). XeDumpActiveWaits() is
++// called periodically from the still-running GPU command thread to snapshot who
++// is stuck on what (a permanently stuck wait never returns, so log-on-return
++// misses it).
++#include <atomic>
++namespace {
++struct XaWaitSlot {
++  std::atomic<uint32_t> tid{0};
++  uint32_t obj{0};
++  int objtype{0};
++  int infinite{0};
++};
++XaWaitSlot g_xa_waits[96];
++}  // namespace
++void XeRecordWaitEnter(uint32_t tid, uint32_t obj, int objtype, int infinite) {
++  if (!tid) return;
++  int free_slot = -1;
++  for (int i = 0; i < 96; i++) {
++    uint32_t t = g_xa_waits[i].tid.load(std::memory_order_relaxed);
++    if (t == tid) {
++      g_xa_waits[i].obj = obj;
++      g_xa_waits[i].objtype = objtype;
++      g_xa_waits[i].infinite = infinite;
++      return;
++    }
++    if (t == 0 && free_slot < 0) free_slot = i;
++  }
++  if (free_slot >= 0) {
++    g_xa_waits[free_slot].obj = obj;
++    g_xa_waits[free_slot].objtype = objtype;
++    g_xa_waits[free_slot].infinite = infinite;
++    g_xa_waits[free_slot].tid.store(tid, std::memory_order_relaxed);
++  }
++}
++void XeRecordWaitExit(uint32_t tid) {
++  for (int i = 0; i < 96; i++) {
++    if (g_xa_waits[i].tid.load(std::memory_order_relaxed) == tid) {
++      g_xa_waits[i].tid.store(0, std::memory_order_relaxed);
++      return;
++    }
++  }
++}
++extern "C" void XeDumpActiveWaits() {
++  for (int i = 0; i < 96; i++) {
++    uint32_t t = g_xa_waits[i].tid.load(std::memory_order_relaxed);
++    if (t) {
++      XELOGI("ACTIVE WAIT: thr={:08X} objtype={} obj={:08X} inf={}", t,
++             g_xa_waits[i].objtype, g_xa_waits[i].obj, g_xa_waits[i].infinite);
++    }
++  }
++}
++
+ namespace xe {
+ namespace kernel {
+ 
+@@ -201,8 +255,14 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
+                         TimeoutTicksToMs(*opt_timeout)))
+                   : std::chrono::milliseconds::max();
+ 
++  // XENIA-ANDROID TEMP: deadlock tracker (see XeRecordWaitEnter above).
++  auto xa_ct = XThread::GetCurrentThread();
++  uint32_t xa_tid = xa_ct ? xa_ct->handle() : 0;
++  XeRecordWaitEnter(xa_tid, guest_object(), int(type()),
++                    int(opt_timeout == nullptr));
+   auto result =
+       xe::threading::Wait(wait_handle, alertable ? true : false, timeout_ms);
++  XeRecordWaitExit(xa_tid);
+ 
+   switch (result) {
+     case xe::threading::WaitResult::kSuccess:
+@@ -397,6 +457,14 @@ void XObject::SetNativePointer(uint32_t native_ptr, bool uninitialized) {
+ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
+                                              void* native_ptr, int32_t as_type,
+                                              bool already_locked) {
++  // XENIA-ANDROID: a null native pointer means "no object" — the guest does this
++  // legitimately (e.g. ObReferenceObject(0), which guards for null right after
++  // this call). Canary's debug-only assert_not_null fires here in our
++  // asserts-enabled build and SIGTRAPs; handle it gracefully so callers get an
++  // empty object_ref instead of a crash. (Halo 3 hit this at boot.) Patch #19.
++  if (!native_ptr) {
++    return object_ref<XObject>(nullptr);
++  }
+   assert_not_null(native_ptr);
+ 
+   // Unfortunately the XDK seems to inline some KeInitialize calls, meaning
+@@ -465,7 +533,22 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
+       case 23:  // ProfileObject
+       case 24:  // ThreadedDpcObject
+       default:
+-        assert_always();
++        // XENIA-ANDROID: unhandled/garbage dispatch-header type. Desktop release
++        // (NDEBUG) returns null here; our build would assert_always()/SIGTRAP.
++        // Return null gracefully — callers (e.g. ObReferenceObject) handle it.
++        // TEMP: log the type so we know what inlined object the game waits on
++        // (a null here makes KeWaitForMultipleObjects fail with INVALID_PARAMETER).
++        {
++          static uint32_t s_gno = 0;
++          if (s_gno++ < 12) {
++            XELOGW(
++                "GetNativeObject: UNHANDLED dispatch type {} at guest {:08X} "
++                "(flink={:08X}) -> returning null",
++                as_type,
++                kernel_state->memory()->HostToGuestVirtual(native_ptr),
++                uint32_t(header->wait_list.flink_ptr));
++          }
++        }
+         result = nullptr;
+     }
+     // Stash pointer in struct.
+diff --git a/src/xenia/kernel/xthread.cc b/src/xenia/kernel/xthread.cc
+index 33610bf..3f977ba 100644
+--- a/src/xenia/kernel/xthread.cc
++++ b/src/xenia/kernel/xthread.cc
+@@ -7,6 +7,9 @@
+  ******************************************************************************
+  */
+ 
++#if XE_PLATFORM_ANDROID
++#include <pthread.h>
++#endif
+ #include "xenia/kernel/xthread.h"
+ 
+ #if !XE_PLATFORM_WIN32
+@@ -511,10 +514,28 @@ X_STATUS XThread::Exit(int exit_code) {
+   xe::Profiler::ThreadExit();
+ 
+   running_ = false;
++#if XE_PLATFORM_ANDROID
++  // XENIA-ANDROID: defer releasing our self-reference until AFTER the OS thread
++  // has actually exited. threading::Thread::Exit() -> Terminate() locks THIS
++  // thread's PosixCondition mutexes; if ReleaseHandle() dropped the last
++  // reference first (detached threads, where the self-reference is the last one),
++  // the PosixThread — owned by this XThread — is freed and Terminate locks a
++  // destroyed mutex ("FORTIFY: pthread_mutex_lock called on a destroyed mutex"
++  // abort; Halo 3 hit this on every worker-thread exit). A pthread cleanup handler
++  // runs during pthread_exit (inside Thread::Exit), i.e. after Terminate's
++  // bookkeeping, so the object stays alive through it and is then released — no
++  // use-after-free and no leak. Patch #20.
++  pthread_cleanup_push(
++      [](void* self) { static_cast<XThread*>(self)->ReleaseHandle(); }, this);
++  // NOTE: this does not return!
++  xe::threading::Thread::Exit(exit_code);
++  pthread_cleanup_pop(0);  // balances the macro (unreachable)
++#else
+   ReleaseHandle();
+ 
+   // NOTE: this does not return!
+   xe::threading::Thread::Exit(exit_code);
++#endif
+   return X_STATUS_SUCCESS;
+ }
+ 
+diff --git a/src/xenia/ui/imgui_drawer.cc b/src/xenia/ui/imgui_drawer.cc
+index 385963a..05b9496 100644
+--- a/src/xenia/ui/imgui_drawer.cc
++++ b/src/xenia/ui/imgui_drawer.cc
+@@ -31,11 +31,11 @@
+ #include <ShlObj_core.h>
+ #endif
+ 
+-#if XE_PLATFORM_LINUX
++#if XE_PLATFORM_LINUX && !XE_PLATFORM_ANDROID  // XENIA-ANDROID: desktop fontconfig only (patch #5)
+ #include <fontconfig/fontconfig.h>
+ #endif
+ 
+-#ifdef XE_PLATFORM_LINUX
++#if defined(XE_PLATFORM_LINUX) && !XE_PLATFORM_ANDROID  // XENIA-ANDROID: desktop fontconfig only (patch #5)
+ #include <gtk/gtk.h>
+ #endif
+ 
+@@ -142,7 +142,7 @@ void ImGuiDrawer::RemoveNotification(ImGuiNotification* dialog) {
+   DetachIfLastWindowRemoved();
+ }
+ 
+-#ifdef XE_PLATFORM_LINUX
++#if defined(XE_PLATFORM_LINUX) && !XE_PLATFORM_ANDROID  // XENIA-ANDROID: desktop fontconfig only (patch #5)
+ static void SetClipboardText(void* user_data, const char* text) {
+   GtkClipboard* clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+   gtk_clipboard_set_text(clipboard, text, -1);
+@@ -170,7 +170,7 @@ void ImGuiDrawer::Initialize() {
+   InitializeFonts(font_size);
+   InitializeFonts(title_font_size);
+ 
+-#ifdef XE_PLATFORM_LINUX
++#if defined(XE_PLATFORM_LINUX) && !XE_PLATFORM_ANDROID  // XENIA-ANDROID: desktop fontconfig only (patch #5)
+   io.SetClipboardTextFn = SetClipboardText;
+   io.GetClipboardTextFn = GetClipboardText;
+ #endif
+@@ -440,7 +440,7 @@ bool ImGuiDrawer::LoadJapaneseFont(ImGuiIO& io, float font_size) {
+   return true;
+ #endif
+ 
+-#if XE_PLATFORM_LINUX
++#if XE_PLATFORM_LINUX && !XE_PLATFORM_ANDROID  // XENIA-ANDROID: desktop fontconfig only (patch #5)
+   // On Linux, find and merge CJK font using fontconfig
+   FcConfig* config = FcInitLoadConfigAndFonts();
+   if (!config) {
+diff --git a/src/xenia/ui/window_android.cc b/src/xenia/ui/window_android.cc
+index 0e675c0..4142f2d 100644
+--- a/src/xenia/ui/window_android.cc
++++ b/src/xenia/ui/window_android.cc
+@@ -55,7 +55,13 @@ void AndroidWindow::OnActivitySurfaceLayoutChange() {
+   OnDesiredLogicalSizeUpdate(SizeToLogical(physical_width),
+                              SizeToLogical(physical_height));
+   WindowDestructionReceiver destruction_receiver(this);
+-  OnActualSizeUpdate(physical_width, physical_height, destruction_receiver);
++  // XENIA-ANDROID: window.h's OnActualSizeUpdate gained a WindowResizeAction parameter; the
++  // Android backend (which upstream never compiles) was stale at 3 args. kManual matches what
++  // the GTK backend passes for an OS-driven surface resize. Logged in CANARY_PATCHES.md (#6).
++  // Original (stale 3-arg) call, kept for reference:
++  // OnActualSizeUpdate(physical_width, physical_height, destruction_receiver);
++  OnActualSizeUpdate(physical_width, physical_height, WindowResizeAction::kManual,
++                     destruction_receiver);
+   if (destruction_receiver.IsWindowDestroyedOrClosed()) {
+     return;
+   }

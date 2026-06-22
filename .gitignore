@@ -1,0 +1,20 @@
+# Build outputs
+/build/
+/app/build/
+/app/.cxx/
+.gradle/
+.externalNativeBuild/
+captures/
+*.apk
+*.ap_
+*.dex
+
+# Local config
+local.properties
+*.iml
+.idea/
+.DS_Store
+
+# The Xenia-Canary engine is large upstream BSD source. It is NOT committed here;
+# fetch + patch it with scripts/setup-engine.sh (pins the commit, applies our patch).
+/third_party/xenia-canary/

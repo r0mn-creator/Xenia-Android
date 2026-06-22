@@ -1,0 +1,27 @@
+Xenia Android
+=============
+
+This application is built on open-source software. The full license texts are in
+each component's source tree (under third_party/) and are reproduced in distributions.
+
+Components and their licenses:
+
+* Xenia / Xenia-Canary  — the Xbox 360 emulator engine, including the a64 ARM64 JIT backend
+  and the Android windowed-app glue.
+  Copyright (c) Ben Vanik and contributors. BSD 3-Clause License.
+  https://github.com/xenia-canary/xenia-canary
+
+* xbyak_aarch64 — the ARM64 code generator used by the a64 backend.
+  Apache License 2.0.
+
+* libadrenotools (if bundled) — custom Vulkan driver loader for Adreno GPUs.
+  BSD 2-Clause License.
+
+* Other third-party libraries vendored by Xenia-Canary (FFmpeg, glslang, SPIRV-Tools, fmt,
+  zlib-ng, etc.) — each under its own license; see third_party/xenia-canary/third_party/.
+
+This project does NOT include code from aX360e (aenu/ax360e); its working result was reached
+independently from the clean upstream sources above.
+
+The Xenia Android application code and UI in this repository (app/) is provided under the
+same BSD 3-Clause terms unless a file states otherwise.

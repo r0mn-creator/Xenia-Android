@@ -1,0 +1,22 @@
+// Xenia Android — root gradle build.
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        // Match Canary's android project toolchain (gradle 7.3.3 / AGP 7.2.1).
+        classpath 'com.android.tools.build:gradle:7.2.1'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
