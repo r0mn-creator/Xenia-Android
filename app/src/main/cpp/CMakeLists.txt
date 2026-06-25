@@ -92,6 +92,18 @@ string(APPEND CMAKE_ASM_FLAGS " -fPIC")
 # compile the ones we link below. (Its desktop executable never builds.)
 add_subdirectory("${CANARY_ROOT}" "${CMAKE_BINARY_DIR}/xenia-canary" EXCLUDE_FROM_ALL)
 
+# XENIA-ANDROID: libadrenotools (BSD-2-Clause, github.com/bylaws/libadrenotools) lets us load
+# a CUSTOM Adreno GPU driver in place of the stock libvulkan.so (the stock driver renders black
+# on this device — see docs root-cause). Canary's vulkan_instance.cc (in the xenia-ui-vulkan
+# target) calls adrenotools_open_libvulkan() when a custom driver is configured. Add the header
+# include + link to that target; the runtime hook .so's are force-built below so gradle packages
+# them into the APK native lib dir (adrenotools dlopens them at driver-load time).
+get_filename_component(ADRENOTOOLS_ROOT
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/libadrenotools" ABSOLUTE)
+add_subdirectory("${ADRENOTOOLS_ROOT}" "${CMAKE_BINARY_DIR}/libadrenotools" EXCLUDE_FROM_ALL)
+target_include_directories(xenia-ui-vulkan PRIVATE "${ADRENOTOOLS_ROOT}/include")
+target_link_libraries(xenia-ui-vulkan PRIVATE adrenotools)
+
 # -----------------------------------------------------------------------------
 # Our JNI shared library: libxenia-app.so
 # -----------------------------------------------------------------------------
@@ -140,6 +152,7 @@ target_link_libraries(xeniaapp PRIVATE
   xenia-gpu-vulkan
   xenia-ui
   xenia-ui-vulkan
+  adrenotools          # XENIA-ANDROID: custom GPU driver loader (BSD-2)
   xenia-hid
   xenia-hid-nop          # silent fallback
   xenia-hid-android      # Android virtual controller (touch / injected input)
@@ -176,6 +189,11 @@ xe_target_defaults(xeniaapp)
 # Safety net: the app-level sources are desktop-oriented Canary code; on Android the stricter
 # NDK clang may surface extra warnings. Don't let them fail the build (real errors still do).
 target_compile_options(xeniaapp PRIVATE -Wno-error)
+
+# XENIA-ANDROID: force-build the adrenotools runtime hook libs so gradle packages them into the
+# APK's lib/<abi>/ (adrenotools dlopens libmain_hook.so + friends from the app native lib dir
+# when loading a custom driver). They're separate runtime .so's, not linked into us.
+add_dependencies(xeniaapp main_hook hook_impl file_redirect_hook gsl_alloc_hook)
 
 # ---------------------------------------------------------------------------
 # XENIA-ANDROID: on-device unit tests. The a64 JIT and our threading/memory

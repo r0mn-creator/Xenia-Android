@@ -63,6 +63,34 @@ index e410c0e..00a550d 100644
  add_subdirectory(hid/portal)
  add_subdirectory(kernel)
  add_subdirectory(patcher)
+diff --git a/src/xenia/app/emulator_window.cc b/src/xenia/app/emulator_window.cc
+index 48e84a7..3cf9fd3 100644
+--- a/src/xenia/app/emulator_window.cc
++++ b/src/xenia/app/emulator_window.cc
+@@ -223,11 +223,13 @@ void EmulatorWindow::SetupGraphicsSystemPresenterPainting() {
+   ShutdownGraphicsSystemPresenterPainting();
+ 
+   if (!window_) {
++    XELOGW("XENIA-ANDROID: SetupGfxPresenter bail: no window -> no UI overlay");
+     return;
+   }
+ 
+   ui::Presenter* presenter = GetGraphicsSystemPresenter();
+   if (!presenter) {
++    XELOGW("XENIA-ANDROID: SetupGfxPresenter bail: no presenter -> no UI overlay");
+     return;
+   }
+ 
+@@ -237,6 +239,9 @@ void EmulatorWindow::SetupGraphicsSystemPresenterPainting() {
+ 
+   immediate_drawer_ =
+       emulator_->graphics_system()->provider()->CreateImmediateDrawer();
++  XELOGI("XENIA-ANDROID: SetupGfxPresenter immediate_drawer={} -> UI overlay {}",
++         immediate_drawer_ != nullptr,
++         immediate_drawer_ ? "ENABLED" : "DISABLED");
+   if (immediate_drawer_) {
+     immediate_drawer_->SetPresenter(presenter);
+     imgui_drawer_->SetPresenterAndImmediateDrawer(presenter,
 diff --git a/src/xenia/app/xenia_main.cc b/src/xenia/app/xenia_main.cc
 index 2dbefb9..e3b1283 100644
 --- a/src/xenia/app/xenia_main.cc
@@ -1068,34 +1096,81 @@ index 8f8519f..ada2ad2 100644
        count * sizeof(uint32_t)) {
      // To handle nesting behavior when tracing we special case indirect buffers.
 diff --git a/src/xenia/gpu/vulkan/vulkan_command_processor.cc b/src/xenia/gpu/vulkan/vulkan_command_processor.cc
-index ce46a01..0f9774f 100644
+index ce46a01..2767ebc 100644
 --- a/src/xenia/gpu/vulkan/vulkan_command_processor.cc
 +++ b/src/xenia/gpu/vulkan/vulkan_command_processor.cc
-@@ -2315,7 +2315,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
+@@ -1385,13 +1385,19 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+                                        uint32_t frontbuffer_height) {
+   SCOPE_profile_cpu_f("gpu");
+ 
++  // XENIA-ANDROID TEMP: trace the present path (rendering works; screen black).
++  static uint32_t s_swap_n = 0;
++  bool swap_log = ((s_swap_n++ % 60) == 0);
++
+   ui::Presenter* presenter = graphics_system_->presenter();
+   if (!presenter) {
++    if (swap_log) XELOGW("IssueSwap #{}: BAIL no presenter", s_swap_n);
+     return;
+   }
+ 
+   // In case the swap command is the only one in the frame.
+   if (!BeginSubmission(true)) {
++    if (swap_log) XELOGW("IssueSwap #{}: BAIL BeginSubmission failed", s_swap_n);
+     return;
+   }
+ 
+@@ -1402,11 +1408,19 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+   VkImageView swap_texture_view = texture_cache_->RequestSwapTexture(
+       frontbuffer_width_scaled, frontbuffer_height_scaled, frontbuffer_format);
+   if (swap_texture_view == VK_NULL_HANDLE) {
++    if (swap_log)
++      XELOGW("IssueSwap #{}: BAIL RequestSwapTexture null (fb=0x{:08X} {}x{})",
++             s_swap_n, frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+     return;
+   }
+ 
+   auto aspect = graphics_system_->GetScaledAspectRatio();
+ 
++  if (swap_log)
++    XELOGI("IssueSwap #{}: swap_tex OK {}x{} fmt={} -> RefreshGuestOutput",
++           s_swap_n, frontbuffer_width_scaled, frontbuffer_height_scaled,
++           int(frontbuffer_format));
++
+   presenter->RefreshGuestOutput(
+       frontbuffer_width_scaled, frontbuffer_height_scaled, aspect.first,
+       aspect.second,
+@@ -2315,7 +2329,21 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
    const RegisterFile& regs = *register_file_;
  
    xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
-+  // XENIA-ANDROID TEMP: trace why early draws bail (no shaders translate).
++  // XENIA-ANDROID TEMP: draw execution breakdown — do real draws ever execute?
 +  static uint32_t s_id_count = 0;
++  static uint32_t s_proceed = 0, s_bail_noeffect = 0, s_bail_novs = 0, s_copy = 0;
 +  bool s_id_log = (s_id_count++ < 20);
++  if ((s_id_count % 50000) == 0) {
++    XELOGI("DRAW STATS @{}: proceed={} copy={} bail_noeffect={} bail_novs={}",
++           s_id_count, s_proceed, s_copy, s_bail_noeffect, s_bail_novs);
++  }
 +  if (s_id_log) {
 +    XELOGI("IssueDraw #{}: edram_mode={} prim={} idx={}", s_id_count,
 +           int(edram_mode), int(prim_type), index_count);
 +  }
    if (edram_mode == xenos::EdramMode::kCopy) {
 +    if (s_id_log) XELOGI("  -> IssueCopy (resolve)");
++    ++s_copy;
      // Special copy handling.
      return IssueCopy();
    }
-@@ -2328,6 +2336,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
+@@ -2328,6 +2356,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
    // Vertex shader analysis.
    auto vertex_shader = static_cast<VulkanShader*>(active_vertex_shader());
    if (!vertex_shader) {
 +    if (s_id_log) XELOGI("  -> BAIL: no vertex shader bound");
++    ++s_bail_novs;
      // Always need a vertex shader.
      return false;
    }
-@@ -2363,10 +2372,24 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
+@@ -2363,10 +2393,27 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
      // Disabling pixel shader for this case is also required by the pipeline
      // cache.
      if (memexport_ranges_.empty()) {
@@ -1110,16 +1185,34 @@ index ce46a01..0f9774f 100644
 +            int(regs.Get<reg::PA_SU_SC_MODE_CNTL>().cull_back));
 +      }
        // This draw has no effect.
++      ++s_bail_noeffect;
        return true;
      }
    }
-+  if (s_id_log) {
-+    XELOGI("  -> PROCEEDING to draw: pixel_shader={} raster_done=1",
-+           pixel_shader != nullptr);
++  ++s_proceed;
++  if (s_id_log || s_proceed <= 20) {
++    XELOGI("  -> PROCEEDING to draw #{}: pixel_shader={} surface_pitch={}",
++           s_proceed, pixel_shader != nullptr,
++           uint32_t(regs.Get<reg::RB_SURFACE_INFO>().surface_pitch));
 +  }
    if (pixel_shader && pixel_shader->memexport_eM_written() != 0 &&
        device_properties.fragmentStoresAndAtomics) {
      draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
+@@ -2937,6 +2984,14 @@ bool VulkanCommandProcessor::IssueCopy() {
+                                      written_address, written_length)) {
+     return false;
+   }
++  // XENIA-ANDROID TEMP: where does the resolve write? (compare with swap read addr)
++  {
++    static uint32_t s_rv = 0;
++    if (written_length && (s_rv++ % 120) == 0) {
++      XELOGI("Resolve WROTE: addr=0x{:08X} len={}", written_address,
++             written_length);
++    }
++  }
+ 
+   // CPU readback resolve path (if not disabled).
+   ReadbackResolveMode readback_mode = GetReadbackResolveMode();
 diff --git a/src/xenia/hid/android/CMakeLists.txt b/src/xenia/hid/android/CMakeLists.txt
 new file mode 100644
 index 0000000..e1406a8
@@ -1932,11 +2025,65 @@ index 33610bf..3f977ba 100644
    return X_STATUS_SUCCESS;
  }
  
+diff --git a/src/xenia/memory.cc b/src/xenia/memory.cc
+index 22ba66a..90f0f15 100644
+--- a/src/xenia/memory.cc
++++ b/src/xenia/memory.cc
+@@ -51,6 +51,19 @@ DEFINE_int32(scribble_heap_value, 0,
+              "Valid range: [1-255]",
+              "Memory");
+ 
++// XENIA-ANDROID: pin the guest virtual membase to a fixed high address
++// (base = mmap_address_high << 32). Our default dynamic first-fit base left the
++// Adreno GPU reading black frames; the working reference build renders with a
++// pinned high base, which stabilizes the GPU shared-memory mapping. Clean-room
++// reimplementation of that concept (our own code, integrated with the existing
++// dynamic fallback in Initialize). 8 => 0x800000000; 0 keeps the legacy
++// behavior. See docs/CANARY_PATCHES.md.
++DEFINE_uint32(mmap_address_high, 8,
++              "High 32 bits of the fixed guest memory base (base = value << 32, "
++              "valid 1..124). Stabilizes the GPU shared-memory mapping on "
++              "Android. 0 = legacy dynamic first-fit base.",
++              "Memory");
++
+ namespace xe {
+ uint32_t get_page_count(uint32_t value, uint32_t page_size) {
+   return xe::round_up(value, page_size) / page_size;
+@@ -204,7 +217,20 @@ bool Memory::Initialize() {
+   // Attempt to create our views. This may fail at the first address
+   // we pick, so try a few times.
+   mapping_base_ = 0;
+-  for (size_t n = 32; n < 64; n++) {
++  // XENIA-ANDROID: try the pinned high base first (the GPU needs a stable guest
++  // membase; the dynamic loop below remains as the fallback).
++  if (cvars::mmap_address_high >= 1 && cvars::mmap_address_high <= 124) {
++    auto pinned_base =
++        reinterpret_cast<uint8_t*>(uint64_t(cvars::mmap_address_high) << 32);
++    if (!MapViews(pinned_base)) {
++      mapping_base_ = pinned_base;
++      XELOGI("Memory: pinned guest membase to {}", static_cast<void*>(pinned_base));
++    } else {
++      XELOGW("Memory: pinned membase {} unavailable, using dynamic base",
++             static_cast<void*>(pinned_base));
++    }
++  }
++  for (size_t n = 32; n < 64 && !mapping_base_; n++) {
+     auto mapping_base = reinterpret_cast<uint8_t*>(1ull << n);
+     if (!MapViews(mapping_base)) {
+       mapping_base_ = mapping_base;
 diff --git a/src/xenia/ui/imgui_drawer.cc b/src/xenia/ui/imgui_drawer.cc
-index 385963a..05b9496 100644
+index 385963a..b908f23 100644
 --- a/src/xenia/ui/imgui_drawer.cc
 +++ b/src/xenia/ui/imgui_drawer.cc
-@@ -31,11 +31,11 @@
+@@ -20,6 +20,7 @@
+ #include "xenia/base/math.h"
+ #include "xenia/ui/imgui_dialog.h"
+ #include "xenia/ui/imgui_notification.h"
++#include "xenia/ui/presenter.h"  // XENIA-ANDROID: GetPresentedFps() for the FPS overlay
+ #include "xenia/ui/resources.h"
+ #include "xenia/ui/ui_event.h"
+ #include "xenia/ui/window.h"
+@@ -31,11 +32,11 @@
  #include <ShlObj_core.h>
  #endif
  
@@ -1950,7 +2097,21 @@ index 385963a..05b9496 100644
  #include <gtk/gtk.h>
  #endif
  
-@@ -142,7 +142,7 @@ void ImGuiDrawer::RemoveNotification(ImGuiNotification* dialog) {
+@@ -46,6 +47,13 @@ DEFINE_path(
+ DEFINE_uint32(font_size, 14, "Allows user to set custom font size.", "UI");
+ UPDATE_from_uint32(font_size, 2024, 8, 31, 20, 12);
+ 
++// XENIA-ANDROID: on-screen frame-rate overlay. Shows the PRESENTED (on-screen) FPS — the
++// frames per second that actually reach the display — not the guest/emulation-core rate.
++DEFINE_bool(show_fps, true,
++            "Show an on-screen overlay (top-left) with the presented frame rate "
++            "(the FPS that actually reaches the screen).",
++            "Display");
++
+ namespace xe {
+ namespace ui {
+ 
+@@ -142,7 +150,7 @@ void ImGuiDrawer::RemoveNotification(ImGuiNotification* dialog) {
    DetachIfLastWindowRemoved();
  }
  
@@ -1959,7 +2120,7 @@ index 385963a..05b9496 100644
  static void SetClipboardText(void* user_data, const char* text) {
    GtkClipboard* clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
    gtk_clipboard_set_text(clipboard, text, -1);
-@@ -170,7 +170,7 @@ void ImGuiDrawer::Initialize() {
+@@ -170,7 +178,7 @@ void ImGuiDrawer::Initialize() {
    InitializeFonts(font_size);
    InitializeFonts(title_font_size);
  
@@ -1968,7 +2129,7 @@ index 385963a..05b9496 100644
    io.SetClipboardTextFn = SetClipboardText;
    io.GetClipboardTextFn = GetClipboardText;
  #endif
-@@ -440,7 +440,7 @@ bool ImGuiDrawer::LoadJapaneseFont(ImGuiIO& io, float font_size) {
+@@ -440,7 +448,7 @@ bool ImGuiDrawer::LoadJapaneseFont(ImGuiIO& io, float font_size) {
    return true;
  #endif
  
@@ -1977,6 +2138,254 @@ index 385963a..05b9496 100644
    // On Linux, find and merge CJK font using fontconfig
    FcConfig* config = FcInitLoadConfigAndFonts();
    if (!config) {
+@@ -589,13 +597,22 @@ void ImGuiDrawer::SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer) {
+ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+   // Drawing of anything is initiated by the presenter.
+   assert_not_null(presenter_);
++  // XENIA-ANDROID TEMP: diagnose why the FPS overlay doesn't show.
++  static uint32_t s_imd = 0;
++  if ((s_imd++ % 120) == 0) {
++    XELOGI("ImGuiDrawer::Draw #{} immediate_drawer={} dialogs={} show_fps={}",
++           s_imd, immediate_drawer_ != nullptr, dialogs_.size(),
++           cvars::show_fps);
++  }
+   if (!immediate_drawer_) {
+     // A presenter has been attached, but an immediate drawer hasn't been
+     // attached yet.
+     return;
+   }
+ 
+-  if (dialogs_.empty() && notifications_.empty()) {
++  // XENIA-ANDROID: still draw when the presented-FPS overlay is enabled, even if there are no
++  // dialogs or notifications (otherwise nothing would render under headless).
++  if (dialogs_.empty() && notifications_.empty() && !cvars::show_fps) {
+     return;
+   }
+ 
+@@ -626,6 +643,24 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+ 
+   ImGui::NewFrame();
+ 
++  // XENIA-ANDROID: presented-FPS overlay (top-left). The value is the actual on-screen frame
++  // rate (measured at the swapchain present in Presenter::PaintAndPresent), so it reflects what
++  // the player sees rather than the guest/emulation-core rate.
++  if (cvars::show_fps) {
++    ImGui::SetNextWindowPos(ImVec2(8.0f, 8.0f), ImGuiCond_Always);
++    ImGui::SetNextWindowBgAlpha(0.45f);
++    if (ImGui::Begin("##xe_fps_overlay", nullptr,
++                     ImGuiWindowFlags_NoDecoration |
++                         ImGuiWindowFlags_AlwaysAutoResize |
++                         ImGuiWindowFlags_NoSavedSettings |
++                         ImGuiWindowFlags_NoFocusOnAppearing |
++                         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs |
++                         ImGuiWindowFlags_NoMove)) {
++      ImGui::Text("%.0f FPS", GetPresentedFps());
++    }
++    ImGui::End();
++  }
++
+   assert_true(!IsDrawingDialogs());
+   dialog_loop_next_index_ = 0;
+   while (dialog_loop_next_index_ < dialogs_.size()) {
+diff --git a/src/xenia/ui/presenter.cc b/src/xenia/ui/presenter.cc
+index d53a081..a8bb486 100644
+--- a/src/xenia/ui/presenter.cc
++++ b/src/xenia/ui/presenter.cc
+@@ -9,6 +9,9 @@
+ 
+ #include "xenia/ui/presenter.h"
+ 
++#include <atomic>
++#include <chrono>
++
+ #include "xenia/base/assert.h"
+ #include "xenia/base/cvar.h"
+ #include "xenia/base/logging.h"
+@@ -423,6 +426,12 @@ bool Presenter::RefreshGuestOutput(
+   PaintResult paint_result = PaintResult::kNotPresented;
+   {
+     std::lock_guard<std::mutex> paint_mode_mutex_lock(paint_mode_mutex_);
++    // XENIA-ANDROID TEMP: why isn't the staged frame painted? (black screen)
++    static uint32_t s_rgo_n = 0;
++    if (is_active && (s_rgo_n++ % 60) == 0) {
++      XELOGI("RefreshGuestOutput: active paint_mode={} conn_state={}",
++             int(paint_mode_), int(surface_paint_connection_state_));
++    }
+     switch (paint_mode_) {
+       case PaintMode::kNone:
+         // Neither painting nor window paint requesting is accessible.
+@@ -435,7 +444,14 @@ bool Presenter::RefreshGuestOutput(
+         // Both painting and window paint requesting are accessible.
+         if (surface_paint_connection_state_ ==
+             SurfacePaintConnectionState::kConnectedPaintable) {
+-          paint_result = PaintAndPresent(false);
++          // XENIA-ANDROID: execute the UI drawers (e.g. the FPS overlay) on this present too.
++          // On Android the UI thread doesn't drive paints, so the ImGui context is only ever
++          // touched here on the guest-output present thread — mark this as the UI-thread paint
++          // so the UI drawers run and the thread-affinity assert is satisfied. (No concurrency:
++          // the UI-thread paint path isn't used while presenting from this thread.)
++          is_in_ui_thread_paint_ = true;
++          paint_result = PaintAndPresent(true);
++          is_in_ui_thread_paint_ = false;
+           if (surface_paint_connection_state_ ==
+               SurfacePaintConnectionState::kConnectedOutdated) {
+             RequestPaintOrConnectionRecoveryViaWindow(true);
+@@ -1271,11 +1287,38 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
+ #endif  // XE_PLATFORM
+ }
+ 
++// XENIA-ANDROID: the actual presented (on-screen) frame rate. Updated below on every frame
++// that actually reaches the swapchain, so the overlay shows what the player sees rather than
++// the guest/emulation-core rate.
++static std::atomic<double> g_presented_fps{0.0};
++double GetPresentedFps() {
++  return g_presented_fps.load(std::memory_order_relaxed);
++}
++
+ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
+   assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
+   assert_true(surface_paint_connection_state_ ==
+               SurfacePaintConnectionState::kConnectedPaintable);
+   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
++  // XENIA-ANDROID: count frames that actually reached the screen (presented), and recompute
++  // the on-screen FPS twice a second.
++  if (result == PaintResult::kPresented ||
++      result == PaintResult::kPresentedSuboptimal) {
++    static uint64_t s_fps_count = 0;
++    static auto s_fps_start = std::chrono::steady_clock::now();
++    ++s_fps_count;
++    auto fps_now = std::chrono::steady_clock::now();
++    double fps_elapsed =
++        std::chrono::duration<double>(fps_now - s_fps_start).count();
++    if (fps_elapsed >= 0.5) {
++      g_presented_fps.store(double(s_fps_count) / fps_elapsed,
++                            std::memory_order_relaxed);
++      XELOGI("Presented (on-screen) FPS: {:.1f}",
++             g_presented_fps.load(std::memory_order_relaxed));
++      s_fps_count = 0;
++      s_fps_start = fps_now;
++    }
++  }
+   switch (result) {
+     case PaintResult::kPresented:
+       surface_paint_connection_was_optimal_at_successful_paint_ = true;
+diff --git a/src/xenia/ui/presenter.h b/src/xenia/ui/presenter.h
+index b1d3822..3d051f7 100644
+--- a/src/xenia/ui/presenter.h
++++ b/src/xenia/ui/presenter.h
+@@ -50,6 +50,11 @@ DECLARE_bool(present_render_pass_clear);
+ namespace xe {
+ namespace ui {
+ 
++// XENIA-ANDROID: the actual on-screen (presented) frame rate — frames per second that reach
++// the swapchain, NOT the guest/emulation-core rate. Measured in Presenter::PaintAndPresent so
++// the FPS overlay reflects what the player actually sees. See docs/CANARY_PATCHES.md.
++double GetPresentedFps();
++
+ class Presenter;
+ class Window;
+ class Win32Window;
+diff --git a/src/xenia/ui/vulkan/vulkan_instance.cc b/src/xenia/ui/vulkan/vulkan_instance.cc
+index 7584e1e..19a98ec 100644
+--- a/src/xenia/ui/vulkan/vulkan_instance.cc
++++ b/src/xenia/ui/vulkan/vulkan_instance.cc
+@@ -26,12 +26,35 @@
+ #include "xenia/base/platform_win.h"
+ #endif
+ 
++// XENIA-ANDROID: custom Adreno GPU driver loader (BSD-2 libadrenotools). Used below to load a
++// user-selected driver in place of the stock libvulkan.so. See docs/CANARY_PATCHES.md.
++#if XE_PLATFORM_ANDROID
++#include "adrenotools/driver.h"
++#endif
++
+ DEFINE_bool(
+     vulkan_log_debug_messages, true,
+     "Write Vulkan VK_EXT_debug_utils messages to the Xenia log, as opposed to "
+     "the OS debug output.",
+     "Vulkan");
+ 
++// XENIA-ANDROID: custom GPU driver cvars. When custom_gpu_driver_dir + _name are set, the
++// driver is loaded via adrenotools instead of the system libvulkan.so. hook_dir = the app
++// native lib dir (holds the adrenotools hook .so's), tmp_dir = a writable scratch dir; both
++// are provided by the app at launch.
++#if XE_PLATFORM_ANDROID
++DEFINE_string(custom_gpu_driver_dir, "",
++              "Directory containing a custom Adreno Vulkan driver (.so + meta.json). "
++              "Empty = use the system driver.",
++              "GPU");
++DEFINE_string(custom_gpu_driver_name, "",
++              "Filename of the custom driver .so (the meta.json libraryName).", "GPU");
++DEFINE_string(gpu_driver_hook_dir, "",
++              "Directory holding the adrenotools hook libraries (app native lib dir).", "GPU");
++DEFINE_string(gpu_driver_tmp_dir, "",
++              "Writable temp directory for the adrenotools driver loader.", "GPU");
++#endif
++
+ namespace xe {
+ namespace ui {
+ namespace vulkan {
+@@ -56,7 +79,33 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
+   const char* const loader_library_name = "libvulkan.so.1";
+ #endif
+   // http://developer.download.nvidia.com/mobile/shield/assets/Vulkan/UsingtheVulkanAPI.pdf
+-  vulkan_instance->loader_ = dlopen(loader_library_name, RTLD_NOW | RTLD_LOCAL);
++  vulkan_instance->loader_ = nullptr;
++#if XE_PLATFORM_ANDROID
++  // XENIA-ANDROID: if a custom GPU driver is configured, load it via adrenotools (the stock
++  // Adreno driver renders black on some devices). Falls back to the system loader on failure.
++  if (!cvars::custom_gpu_driver_dir.empty() &&
++      !cvars::custom_gpu_driver_name.empty()) {
++    vulkan_instance->loader_ = adrenotools_open_libvulkan(
++        RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM,
++        cvars::gpu_driver_tmp_dir.empty() ? nullptr
++                                          : cvars::gpu_driver_tmp_dir.c_str(),
++        cvars::gpu_driver_hook_dir.empty() ? nullptr
++                                           : cvars::gpu_driver_hook_dir.c_str(),
++        cvars::custom_gpu_driver_dir.c_str(),
++        cvars::custom_gpu_driver_name.c_str(), nullptr, nullptr);
++    if (vulkan_instance->loader_) {
++      XELOGI("Loaded custom GPU driver {}/{}", cvars::custom_gpu_driver_dir,
++             cvars::custom_gpu_driver_name);
++    } else {
++      XELOGW("Custom GPU driver failed to load; using system {}",
++             loader_library_name);
++    }
++  }
++#endif
++  if (!vulkan_instance->loader_) {
++    vulkan_instance->loader_ =
++        dlopen(loader_library_name, RTLD_NOW | RTLD_LOCAL);
++  }
+   if (!vulkan_instance->loader_) {
+     XELOGE("Failed to load {}", loader_library_name);
+     return nullptr;
+diff --git a/src/xenia/ui/vulkan/vulkan_presenter.cc b/src/xenia/ui/vulkan/vulkan_presenter.cc
+index 36f1b55..6836a6e 100644
+--- a/src/xenia/ui/vulkan/vulkan_presenter.cc
++++ b/src/xenia/ui/vulkan/vulkan_presenter.cc
+@@ -1392,6 +1392,9 @@ bool VulkanPresenter::GuestOutputImage::Initialize() {
+ 
+ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
+     bool execute_ui_drawers) {
++  // XENIA-ANDROID TEMP: is the paint driven, and does it have a guest output?
++  static uint32_t s_paint_n = 0;
++  bool paint_log = ((s_paint_n++ % 60) == 0);
+   // Begin the submission in place of the one not currently potentially used on
+   // the GPU.
+   const uint64_t current_paint_submission_index =
+@@ -1529,6 +1532,11 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
+     // multiple threads can't paint the main target at the same time).
+   }
+ 
++  if (paint_log) {
++    XELOGI("PaintAndPresent #{}: guest_output_image={} (null => black screen)",
++           s_paint_n, guest_output_image != nullptr);
++  }
++
+   if (guest_output_image) {
+     VkExtent2D max_framebuffer_extent =
+         util::GetMax2DFramebufferExtent(vulkan_device_->properties());
 diff --git a/src/xenia/ui/window_android.cc b/src/xenia/ui/window_android.cc
 index 0e675c0..4142f2d 100644
 --- a/src/xenia/ui/window_android.cc

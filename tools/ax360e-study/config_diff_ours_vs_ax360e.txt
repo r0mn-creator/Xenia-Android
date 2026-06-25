@@ -1,0 +1,88 @@
+4c4
+< ac6_ground_fix = false
+---
+> adrenotools_force_max_clocks = false
+7a8
+> allow_nui_initialization = false
+9d9
+< anisotropic_override = -1
+12c12
+< apu = "any"
+---
+> apu = "aaudio"
+14c14
+< async_shader_compilation = true
+---
+> audio_flag = 65537
+34,35d33
+< custom_internal_display_resolution_x = 0
+< custom_internal_display_resolution_y = 0
+48c46
+< discord = true
+---
+> discord = false
+72,73c70
+< gamma_render_target_as_unorm16 = true
+< gpu_3d_to_2d_texture = true
+---
+> gamma_render_target_as_srgb = false
+76c73
+< gpu = "any"
+---
+> gpu = "vulkan"
+80c77
+< hid = "any"
+---
+> hid = "android"
+88a86,88
+> internal_display_resolution = 8
+> internal_display_resolution_x = 1280
+> internal_display_resolution_y = 720
+99c99,100
+< logged_profile_slot_0_xuid = ""
+---
+> log_file = ""
+> logged_profile_slot_0_xuid = "E0300000A360E000"
+109,110c110,113
+< log_to_logcat = true
+< mount_cache = true
+---
+> log_to_debugprint = false
+> log_to_stdout = true
+> mmap_address_high = 8
+> mount_cache = false
+117d119
+< no_discard_stencil_in_transfer_pipelines = false
+121,125d122
+< occlusion_query_fake_lower_threshold = 80
+< occlusion_query_fake_upper_threshold = 100
+< occlusion_query = "fast"
+< occlusion_query_querybatch_range = 0
+< occlusion_query_saturation = 1
+142a140,141
+> query_occlusion_sample_lower_threshold = 80
+> query_occlusion_sample_upper_threshold = 100
+165d163
+< tiled_shared_memory = true
+174a173
+> use_50Hz_mode = false
+175a175,176
+> user_country = 103
+> user_language = 1
+177a179
+> video_standard = 1
+182a185
+> vulkan_lib_path = ""
+184,185d186
+< vulkan_pipeline_creation_threads = -1
+< vulkan_semaphore_reuse_workaround = false
+188,189c189
+< window_size_x = 1280
+< window_size_y = 720
+---
+> widescreen = true
+192c192,193
+< xma_decoder = "new"
+---
+> xma_decoder = "old"
+> xmp_default_volume = 70
