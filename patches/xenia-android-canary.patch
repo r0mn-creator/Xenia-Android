@@ -64,7 +64,7 @@ index e410c0e..00a550d 100644
  add_subdirectory(kernel)
  add_subdirectory(patcher)
 diff --git a/src/xenia/app/emulator_window.cc b/src/xenia/app/emulator_window.cc
-index 48e84a7..3cf9fd3 100644
+index 48e84a7..7b9b092 100644
 --- a/src/xenia/app/emulator_window.cc
 +++ b/src/xenia/app/emulator_window.cc
 @@ -223,11 +223,13 @@ void EmulatorWindow::SetupGraphicsSystemPresenterPainting() {
@@ -81,13 +81,15 @@ index 48e84a7..3cf9fd3 100644
      return;
    }
  
-@@ -237,6 +239,9 @@ void EmulatorWindow::SetupGraphicsSystemPresenterPainting() {
+@@ -237,6 +239,11 @@ void EmulatorWindow::SetupGraphicsSystemPresenterPainting() {
  
    immediate_drawer_ =
        emulator_->graphics_system()->provider()->CreateImmediateDrawer();
-+  XELOGI("XENIA-ANDROID: SetupGfxPresenter immediate_drawer={} -> UI overlay {}",
-+         immediate_drawer_ != nullptr,
-+         immediate_drawer_ ? "ENABLED" : "DISABLED");
++  XELOGI(
++      "XENIA-ANDROID: SetupGfxPresenter presenter={} immediate_drawer={} -> UI "
++      "overlay {}",
++      static_cast<void*>(presenter), immediate_drawer_ != nullptr,
++      immediate_drawer_ ? "ENABLED" : "DISABLED");
    if (immediate_drawer_) {
      immediate_drawer_->SetPresenter(presenter);
      imgui_drawer_->SetPresenterAndImmediateDrawer(presenter,
@@ -2072,7 +2074,7 @@ index 22ba66a..90f0f15 100644
      if (!MapViews(mapping_base)) {
        mapping_base_ = mapping_base;
 diff --git a/src/xenia/ui/imgui_drawer.cc b/src/xenia/ui/imgui_drawer.cc
-index 385963a..b908f23 100644
+index 385963a..00d7bf0 100644
 --- a/src/xenia/ui/imgui_drawer.cc
 +++ b/src/xenia/ui/imgui_drawer.cc
 @@ -20,6 +20,7 @@
@@ -2138,7 +2140,19 @@ index 385963a..b908f23 100644
    // On Linux, find and merge CJK font using fontconfig
    FcConfig* config = FcInitLoadConfigAndFonts();
    if (!config) {
-@@ -589,13 +597,22 @@ void ImGuiDrawer::SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer) {
+@@ -540,6 +548,11 @@ void ImGuiDrawer::SetupFontTexture() {
+ }
+ 
+ void ImGuiDrawer::SetPresenter(Presenter* new_presenter) {
++  // XENIA-ANDROID NOTE: registering this drawer (so the FPS overlay draws) makes the present
++  // execute UI drawers, and rendering ImGui via the immediate_drawer on our GPU-emulation
++  // present thread deadlocks against the game's Vulkan work. So the overlay can't ride this path
++  // yet — left as the upstream dialog-only registration. The FPS value is still measured
++  // (GetPresentedFps); the overlay needs a non-conflicting render path (TODO).
+   if (presenter_) {
+     if (presenter_ == new_presenter) {
+       return;
+@@ -589,13 +602,22 @@ void ImGuiDrawer::SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer) {
  void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
    // Drawing of anything is initiated by the presenter.
    assert_not_null(presenter_);
@@ -2162,7 +2176,7 @@ index 385963a..b908f23 100644
      return;
    }
  
-@@ -626,6 +643,24 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+@@ -626,6 +648,24 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
  
    ImGui::NewFrame();
  
@@ -2188,7 +2202,7 @@ index 385963a..b908f23 100644
    dialog_loop_next_index_ = 0;
    while (dialog_loop_next_index_ < dialogs_.size()) {
 diff --git a/src/xenia/ui/presenter.cc b/src/xenia/ui/presenter.cc
-index d53a081..a8bb486 100644
+index d53a081..06911c2 100644
 --- a/src/xenia/ui/presenter.cc
 +++ b/src/xenia/ui/presenter.cc
 @@ -9,6 +9,9 @@
@@ -2214,23 +2228,36 @@ index d53a081..a8bb486 100644
      switch (paint_mode_) {
        case PaintMode::kNone:
          // Neither painting nor window paint requesting is accessible.
-@@ -435,7 +444,14 @@ bool Presenter::RefreshGuestOutput(
+@@ -435,6 +444,15 @@ bool Presenter::RefreshGuestOutput(
          // Both painting and window paint requesting are accessible.
          if (surface_paint_connection_state_ ==
              SurfacePaintConnectionState::kConnectedPaintable) {
--          paint_result = PaintAndPresent(false);
 +          // XENIA-ANDROID: execute the UI drawers (e.g. the FPS overlay) on this present too.
 +          // On Android the UI thread doesn't drive paints, so the ImGui context is only ever
 +          // touched here on the guest-output present thread — mark this as the UI-thread paint
 +          // so the UI drawers run and the thread-affinity assert is satisfied. (No concurrency:
 +          // the UI-thread paint path isn't used while presenting from this thread.)
-+          is_in_ui_thread_paint_ = true;
-+          paint_result = PaintAndPresent(true);
-+          is_in_ui_thread_paint_ = false;
++          // XENIA-ANDROID: present WITHOUT executing UI drawers here. Running the UI render
++          // (immediate_drawer / ImGui) on this GPU-emulation present thread deadlocks against the
++          // game's own Vulkan work (shared device/queue) — the present never returns. The FPS
++          // overlay infrastructure is in place; it needs a non-conflicting render path (TODO).
+           paint_result = PaintAndPresent(false);
            if (surface_paint_connection_state_ ==
                SurfacePaintConnectionState::kConnectedOutdated) {
-             RequestPaintOrConnectionRecoveryViaWindow(true);
-@@ -1271,11 +1287,38 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
+@@ -1028,6 +1046,12 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+ }
+ 
+ void Presenter::ExecuteUIDrawersFromUIThread(UIDrawContext& ui_draw_context) {
++  // XENIA-ANDROID TEMP: is this called, and does it see the registered drawer(s)?
++  static uint32_t s_eud = 0;
++  if ((s_eud++ % 120) == 0) {
++    XELOGI("ExecuteUIDrawers #{}: ui_drawers={} (this presenter={})", s_eud,
++           ui_drawers_.size(), static_cast<void*>(this));
++  }
+   // May be called by the implementations only when requested.
+   assert_true(is_in_ui_thread_paint_);
+   // Drawers can add or remove drawers (including themselves), need to ensure
+@@ -1271,11 +1295,38 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
  #endif  // XE_PLATFORM
  }
  
