@@ -1639,25 +1639,6 @@ index 0000000..70004b0
 +
 +#endif  // XE_PLATFORM_ANDROID
 +#endif  // XENIA_HID_ANDROID_ANDROID_HID_H_
-diff --git a/src/xenia/kernel/kernel_flags.cc b/src/xenia/kernel/kernel_flags.cc
-index bb9e920..aa07268 100644
---- a/src/xenia/kernel/kernel_flags.cc
-+++ b/src/xenia/kernel/kernel_flags.cc
-@@ -9,7 +9,13 @@
- 
- #include "xenia/kernel/kernel_flags.h"
- 
--DEFINE_bool(headless, false,
-+// XENIA-ANDROID (patch #22): default headless=true, matching aX360e. Android has
-+// no way to drive Xenia's ImGui prompt dialogs, so a guest XamShowMessageBoxUIEx /
-+// sign-in prompt with headless=false blocks the guest thread forever on
-+// CallInUIThreadSynchronous (our "Main joins a XAM task that never finishes"
-+// deadlock). headless=true takes default answers and never blocks. CANARY_PATCHES.md.
-+// ORIGINAL: DEFINE_bool(headless, false,
-+DEFINE_bool(headless, true,
-             "Don't display any UI, using defaults for prompts as needed.",
-             "UI");
- DEFINE_bool(log_high_frequency_kernel_calls, false,
 diff --git a/src/xenia/kernel/xam/profile_manager.cc b/src/xenia/kernel/xam/profile_manager.cc
 index 33bb264..e416698 100644
 --- a/src/xenia/kernel/xam/profile_manager.cc

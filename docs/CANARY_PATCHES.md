@@ -66,6 +66,8 @@ of the fork onto newer upstream, resolve conflicts **only** in the files listed 
 | 18 | `code_cache_base.h` + `a64/a64_emitter.cc` | Relocate JIT indirection table off 0x80000000 when ART Java heap collides | med |
 | 19 | `src/xenia/kernel/xobject.cc` | GetNativeObject: handle null native_ptr gracefully | low |
 | 20 | `src/xenia/kernel/xthread.cc` | XThread::Exit: defer ReleaseHandle via pthread cleanup (fix use-after-destroy of PosixThread on detached-thread exit) | med |
+| 21 | `src/xenia/kernel/xboxkrnl/xboxkrnl_debug.cc` | HandleSetThreadName: bounded strnlen read of guest thread-name (game passes freed/junk no-terminator memory -> unbounded strlen ran off into host mappings -> scudo heap corruption/abort). Fixes the Halo 3 SetThreadName crash | high |
+| 22 | `src/xenia/kernel/kernel_flags.cc` | headless default false->true (Android can't drive ImGui prompts; guest XamShowMessageBox/sign-in with headless=false blocks the guest thread on the UI thread = the stall). Matches aX360e. Got Halo to full RENDER/AUDIO/NET subsystem init | high |
 
 ### 1. `third_party/xenia-canary/CMakeLists.txt` — `XE_PLATFORM_NAME`
 - **Why:** Canary sets `XE_PLATFORM_NAME` to Windows/macOS/Linux only; Android fell through

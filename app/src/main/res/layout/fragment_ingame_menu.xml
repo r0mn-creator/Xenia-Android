@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="260dp"
+    android:layout_height="match_parent"
+    android:background="?attr/colorSurface"
+    android:elevation="8dp"
+    android:orientation="vertical">
+
+    <TextView
+        android:id="@+id/text_game_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:paddingTop="24dp"
+        android:paddingBottom="16dp"
+        android:textColor="?attr/colorOnSurface"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:maxLines="2"
+        android:ellipsize="end" />
+
+    <com.google.android.material.divider.MaterialDivider
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp">
+
+            <TextView android:id="@+id/menu_pause"
+                android:layout_width="match_parent" android:layout_height="52dp"
+                android:gravity="center_vertical" android:paddingStart="24dp"
+                android:text="Pause" android:textSize="15sp"
+                android:textColor="?attr/colorOnSurface"
+                android:background="?attr/selectableItemBackground" android:clickable="true" android:focusable="true" />
+
+            <TextView android:id="@+id/menu_resume"
+                android:layout_width="match_parent" android:layout_height="52dp"
+                android:gravity="center_vertical" android:paddingStart="24dp"
+                android:text="Resume" android:textSize="15sp"
+                android:textColor="?attr/colorOnSurface"
+                android:background="?attr/selectableItemBackground" android:clickable="true" android:focusable="true"
+                android:visibility="gone" />
+
+            <TextView android:id="@+id/menu_screenshot"
+                android:layout_width="match_parent" android:layout_height="52dp"
+                android:gravity="center_vertical" android:paddingStart="24dp"
+                android:text="Take Screenshot" android:textSize="15sp"
+                android:textColor="?attr/colorOnSurface"
+                android:background="?attr/selectableItemBackground" android:clickable="true" android:focusable="true" />
+
+            <TextView android:id="@+id/menu_save_state"
+                android:layout_width="match_parent" android:layout_height="52dp"
+                android:gravity="center_vertical" android:paddingStart="24dp"
+                android:text="Save State" android:textSize="15sp"
+                android:textColor="?attr/colorOnSurface"
+                android:background="?attr/selectableItemBackground" android:clickable="true" android:focusable="true" />
+
+            <TextView android:id="@+id/menu_load_state"
+                android:layout_width="match_parent" android:layout_height="52dp"
+                android:gravity="center_vertical" android:paddingStart="24dp"
+                android:text="Load State" android:textSize="15sp"
+                android:textColor="?attr/colorOnSurface"
+                android:background="?attr/selectableItemBackground" android:clickable="true" android:focusable="true" />
+
+            <TextView android:id="@+id/menu_controls"
+                android:layout_width="match_parent" android:layout_height="52dp"
+                android:gravity="center_vertical" android:paddingStart="24dp"
+                android:text="Controller Overlay" android:textSize="15sp"
+                android:textColor="?attr/colorOnSurface"
+                android:background="?attr/selectableItemBackground" android:clickable="true" android:focusable="true" />
+
+            <TextView android:id="@+id/menu_settings"
+                android:layout_width="match_parent" android:layout_height="52dp"
+                android:gravity="center_vertical" android:paddingStart="24dp"
+                android:text="Settings" android:textSize="15sp"
+                android:textColor="?attr/colorOnSurface"
+                android:background="?attr/selectableItemBackground" android:clickable="true" android:focusable="true" />
+
+        </LinearLayout>
+
+    </ScrollView>
+
+    <com.google.android.material.divider.MaterialDivider
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <TextView android:id="@+id/menu_exit"
+        android:layout_width="match_parent" android:layout_height="56dp"
+        android:gravity="center_vertical" android:paddingStart="24dp"
+        android:text="Exit Game" android:textSize="15sp"
+        android:textColor="#F44336"
+        android:background="?attr/selectableItemBackground" android:clickable="true" android:focusable="true" />
+
+</LinearLayout>

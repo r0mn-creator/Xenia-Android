@@ -2,4 +2,5 @@
     <string name="app_name">Xenia Android</string>
     <string name="activity_label_gpu_trace_viewer">GPU Trace Viewer</string>
     <string name="activity_label_window_demo">Window Demo</string>
+    <string name="activity_label_emulator">Emulator</string>
 </resources>

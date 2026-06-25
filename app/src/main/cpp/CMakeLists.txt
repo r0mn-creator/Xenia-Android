@@ -176,3 +176,60 @@ xe_target_defaults(xeniaapp)
 # Safety net: the app-level sources are desktop-oriented Canary code; on Android the stricter
 # NDK clang may surface extra warnings. Don't let them fail the build (real errors still do).
 target_compile_options(xeniaapp PRIVATE -Wno-error)
+
+# ---------------------------------------------------------------------------
+# XENIA-ANDROID: on-device unit tests. The a64 JIT and our threading/memory
+# changes can only be validated on real arm64 — so build the engine's existing
+# Catch2 suites as device executables (run from /data/local/tmp). This is OUR
+# file, so it needs no engine patch. Built on demand via:
+#   cmake --build <cxx-dir> --target xenia-base-tests
+# ---------------------------------------------------------------------------
+file(GLOB _xa_base_tests "${CANARY_ROOT}/src/xenia/base/testing/*_test.cc")
+add_executable(xenia-base-tests
+  ${_xa_base_tests}
+  "${CANARY_ROOT}/tools/build/src/test_suite_main.cc"
+  "${CANARY_ROOT}/src/xenia/base/console_app_main_posix.cc"
+)
+target_include_directories(xenia-base-tests PRIVATE "${CANARY_ROOT}/src" "${CANARY_ROOT}")
+target_compile_definitions(xenia-base-tests PRIVATE "XE_TEST_SUITE_NAME=\"xenia-base-tests\"")
+target_link_libraries(xenia-base-tests PRIVATE fmt xenia-base xenia-core xenia-cpu log)
+xe_target_defaults(xenia-base-tests)
+target_compile_options(xenia-base-tests PRIVATE -Wno-error)
+
+# XENIA-ANDROID: a64 JIT correctness tests (cpu/testing -> generates guest code,
+# runs it through the A64 backend, checks results). Validates the ARM64 codegen.
+file(GLOB _xa_cpu_tests "${CANARY_ROOT}/src/xenia/cpu/testing/*_test.cc")
+  list(FILTER _xa_cpu_tests EXCLUDE REGEX "backend_integration_test")
+add_executable(xenia-cpu-tests
+  ${_xa_cpu_tests}
+  "${CANARY_ROOT}/tools/build/src/test_suite_main.cc"
+  "${CANARY_ROOT}/src/xenia/base/console_app_main_posix.cc"
+)
+target_include_directories(xenia-cpu-tests PRIVATE "${CANARY_ROOT}/src" "${CANARY_ROOT}")
+target_compile_definitions(xenia-cpu-tests PRIVATE "XE_TEST_SUITE_NAME=\"xenia-cpu-tests\"")
+target_link_libraries(xenia-cpu-tests PRIVATE
+  capstone fmt imgui xenia-base xenia-core xenia-cpu xenia-gpu
+  xenia-kernel xenia-ui xenia-patcher xenia-cpu-backend-a64 log)
+xe_target_defaults(xenia-cpu-tests)
+target_compile_options(xenia-cpu-tests PRIVATE -Wno-error)
+
+# XENIA-ANDROID: kernel + vfs unit tests (on-device).
+file(GLOB _xa_kernel_tests "${CANARY_ROOT}/src/xenia/kernel/testing/*_test.cc")
+add_executable(xenia-kernel-tests ${_xa_kernel_tests}
+  "${CANARY_ROOT}/tools/build/src/test_suite_main.cc"
+  "${CANARY_ROOT}/src/xenia/base/console_app_main_posix.cc")
+target_include_directories(xenia-kernel-tests PRIVATE "${CANARY_ROOT}/src" "${CANARY_ROOT}")
+target_compile_definitions(xenia-kernel-tests PRIVATE "XE_TEST_SUITE_NAME=\"xenia-kernel-tests\"")
+target_link_libraries(xenia-kernel-tests PRIVATE fmt xenia-base xenia-core xenia-cpu log)
+xe_target_defaults(xenia-kernel-tests)
+target_compile_options(xenia-kernel-tests PRIVATE -Wno-error)
+
+file(GLOB _xa_vfs_tests "${CANARY_ROOT}/src/xenia/vfs/testing/*_test.cc")
+add_executable(xenia-vfs-tests ${_xa_vfs_tests}
+  "${CANARY_ROOT}/tools/build/src/test_suite_main.cc"
+  "${CANARY_ROOT}/src/xenia/base/console_app_main_posix.cc")
+target_include_directories(xenia-vfs-tests PRIVATE "${CANARY_ROOT}/src" "${CANARY_ROOT}")
+target_compile_definitions(xenia-vfs-tests PRIVATE "XE_TEST_SUITE_NAME=\"xenia-vfs-tests\"")
+target_link_libraries(xenia-vfs-tests PRIVATE fmt xenia-base xenia-core xenia-cpu xenia-vfs log)
+xe_target_defaults(xenia-vfs-tests)
+target_compile_options(xenia-vfs-tests PRIVATE -Wno-error)
