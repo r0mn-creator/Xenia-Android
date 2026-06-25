@@ -94,7 +94,7 @@ index 48e84a7..7b9b092 100644
      immediate_drawer_->SetPresenter(presenter);
      imgui_drawer_->SetPresenterAndImmediateDrawer(presenter,
 diff --git a/src/xenia/app/xenia_main.cc b/src/xenia/app/xenia_main.cc
-index 2dbefb9..e3b1283 100644
+index ab94373..ac2fcea 100644
 --- a/src/xenia/app/xenia_main.cc
 +++ b/src/xenia/app/xenia_main.cc
 @@ -36,6 +36,10 @@
@@ -1057,6 +1057,34 @@ index 940a9a4..279b99f 100644
      // Execute. Note that we handle wraparound transparently.
      read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
  
+diff --git a/src/xenia/gpu/graphics_system.cc b/src/xenia/gpu/graphics_system.cc
+index 50956d4..1439b09 100644
+--- a/src/xenia/gpu/graphics_system.cc
++++ b/src/xenia/gpu/graphics_system.cc
+@@ -73,6 +73,12 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
+ 
+   if (with_presentation && provider_) {
+     // Safe if either the UI thread call or the presenter creation fails.
++    // XENIA-ANDROID: create the presenter DIRECTLY on this (GPU setup) thread instead of via the
++    // UI thread. We present from the guest-output/GPU thread (host_present_from_non_ui_thread), and
++    // a presenter created on the UI thread but presented from the GPU thread has a thread-affinity
++    // split that composites a BLACK screen on Android. Creating it directly (as aX360e does)
++    // removes that split. The original UI-thread path is preserved for all other platforms.
++#if !XE_PLATFORM_ANDROID
+     if (app_context_) {
+       app_context_->CallInUIThreadSynchronous([this]() {
+         presenter_ = provider_->CreatePresenter(
+@@ -80,7 +86,9 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
+               OnHostGpuLossFromAnyThread(is_responsible);
+             });
+       });
+-    } else {
++    } else
++#endif
++    {
+       // May be needed for offscreen use, such as capturing the guest output
+       // image.
+       presenter_ = provider_->CreatePresenter(
 diff --git a/src/xenia/gpu/pm4_command_processor_implement.h b/src/xenia/gpu/pm4_command_processor_implement.h
 index 8f8519f..ada2ad2 100644
 --- a/src/xenia/gpu/pm4_command_processor_implement.h
@@ -1835,7 +1863,7 @@ index e63a28d..51e1492 100644
        }
  
 diff --git a/src/xenia/kernel/xboxkrnl/xboxkrnl_video.cc b/src/xenia/kernel/xboxkrnl/xboxkrnl_video.cc
-index f4da2c2..5bd4dd0 100644
+index 1283523..fc7201f 100644
 --- a/src/xenia/kernel/xboxkrnl/xboxkrnl_video.cc
 +++ b/src/xenia/kernel/xboxkrnl/xboxkrnl_video.cc
 @@ -472,6 +472,14 @@ void VdSwap_entry(
@@ -2028,7 +2056,7 @@ index 33610bf..3f977ba 100644
  }
  
 diff --git a/src/xenia/memory.cc b/src/xenia/memory.cc
-index 22ba66a..90f0f15 100644
+index 1b64b75..00969a9 100644
 --- a/src/xenia/memory.cc
 +++ b/src/xenia/memory.cc
 @@ -51,6 +51,19 @@ DEFINE_int32(scribble_heap_value, 0,

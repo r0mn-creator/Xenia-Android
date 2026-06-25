@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # Pinned Xenia-Canary commit this project is built against.
-CANARY_COMMIT="e7d0e45"
+CANARY_COMMIT="0b4e6c4"
 CANARY_URL="https://github.com/xenia-canary/xenia-canary.git"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

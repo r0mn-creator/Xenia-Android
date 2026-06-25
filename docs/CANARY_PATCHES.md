@@ -197,3 +197,11 @@ Template for new entries:
 - **Upstreamable?:** <yes/no — could this be contributed back?>
 - **Update risk:** <low/med/high — how likely upstream churn collides with this>
 -->
+
+
+## gpu/graphics_system.cc — create presenter directly on Android (not via UI thread)
+`XENIA-ANDROID:` In `GraphicsSystem::Setup`, the UI-thread presenter-creation path
+(`app_context_->CallInUIThreadSynchronous(...)`) is wrapped in `#if !XE_PLATFORM_ANDROID`, so on
+Android the presenter is created DIRECTLY on the calling (GPU setup) thread. We present from the
+guest-output/GPU thread; a UI-thread-created presenter presented from the GPU thread has a thread-
+affinity split. Matches aX360e behavior. Original path preserved for other platforms.
