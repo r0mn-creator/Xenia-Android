@@ -1782,7 +1782,7 @@ index bb9e920..aa07268 100644
              "UI");
  DEFINE_bool(log_high_frequency_kernel_calls, false,
 diff --git a/src/xenia/kernel/xam/profile_manager.cc b/src/xenia/kernel/xam/profile_manager.cc
-index 33bb264..e416698 100644
+index 33bb264..bdd1383 100644
 --- a/src/xenia/kernel/xam/profile_manager.cc
 +++ b/src/xenia/kernel/xam/profile_manager.cc
 @@ -105,6 +105,18 @@ ProfileManager::ProfileManager(KernelState* kernel_state,
@@ -1804,6 +1804,24 @@ index 33bb264..e416698 100644
    if (!cvars::logged_profile_slot_0_xuid.empty()) {
      Login(xe::string_util::from_string<uint64_t>(
                cvars::logged_profile_slot_0_xuid, true),
+@@ -128,6 +140,17 @@ ProfileManager::ProfileManager(KernelState* kernel_state,
+               cvars::logged_profile_slot_3_xuid, true),
+           3);
+   }
++
++  // XENIA-ANDROID: final backstop — guarantee a signed-in user. If nothing got signed in above
++  // (e.g. the config was reset so no slot is configured, but a profile already exists on disk, so
++  // the create-"Jimmy" path was skipped), sign in the first available profile. Many Live-aware
++  // games park at boot until they see a signed-in user. (patch #17)
++  if (!IsAnyProfileSignedIn() && !accounts_.empty()) {
++    const uint64_t first_xuid = accounts_.begin()->first;
++    XELOGI("XENIA-ANDROID: no profile signed in — auto-signing first profile {:016X}",
++           first_xuid);
++    Login(first_xuid, 0);
++  }
+ }
+ 
+ void ProfileManager::ReloadProfile(const uint64_t xuid) {
 diff --git a/src/xenia/kernel/xboxkrnl/xboxkrnl_debug.cc b/src/xenia/kernel/xboxkrnl/xboxkrnl_debug.cc
 index fdfa33c..7e78fb1 100644
 --- a/src/xenia/kernel/xboxkrnl/xboxkrnl_debug.cc

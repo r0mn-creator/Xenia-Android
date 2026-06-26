@@ -62,7 +62,7 @@ of the fork onto newer upstream, resolve conflicts **only** in the files listed 
 | 14 | `src/xenia/CMakeLists.txt` + NEW `src/xenia/hid/android/` + `xenia_main.cc` | Add Android input (HID) backend | low |
 | 15 | `src/xenia/base/threading_posix.cc` | Fix QueueUserCallback (APC wakeup) to target the specific thread via rt_tgsigqueueinfo | med |
 | 16 | `src/xenia/cpu/backend/code_cache_base.h` (+ app early_reserve.cc) | Release early low-mem reservation before code-cache AllocFixed (fixes flaky 0x80000000 alloc) | low |
-| 17 | `src/xenia/kernel/xam/profile_manager.cc` | Auto-create default offline profile 'Jimmy' if none exist | low |
+| 17 | `src/xenia/kernel/xam/profile_manager.cc` | Auto-create default offline 'Jimmy' if none exist + always sign in a profile if one exists (backstop) | low |
 | 18 | `code_cache_base.h` + `a64/a64_emitter.cc` | Relocate JIT indirection table off 0x80000000 when ART Java heap collides | med |
 | 19 | `src/xenia/kernel/xobject.cc` | GetNativeObject: handle null native_ptr gracefully | low |
 | 20 | `src/xenia/kernel/xthread.cc` | XThread::Exit: defer ReleaseHandle via pthread cleanup (fix use-after-destroy of PosixThread on detached-thread exit) | med |
