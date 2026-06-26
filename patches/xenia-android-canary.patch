@@ -1177,7 +1177,7 @@ index 3f70a20..2e20533 100644
  
    uint32_t page_first = physical_address_start >> page_size_log2_;
 diff --git a/src/xenia/gpu/vulkan/vulkan_command_processor.cc b/src/xenia/gpu/vulkan/vulkan_command_processor.cc
-index ce46a01..2767ebc 100644
+index ce46a01..86845af 100644
 --- a/src/xenia/gpu/vulkan/vulkan_command_processor.cc
 +++ b/src/xenia/gpu/vulkan/vulkan_command_processor.cc
 @@ -1385,13 +1385,19 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
@@ -1279,7 +1279,7 @@ index ce46a01..2767ebc 100644
    if (pixel_shader && pixel_shader->memexport_eM_written() != 0 &&
        device_properties.fragmentStoresAndAtomics) {
      draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
-@@ -2937,6 +2984,14 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -2937,6 +2984,107 @@ bool VulkanCommandProcessor::IssueCopy() {
                                       written_address, written_length)) {
      return false;
    }
@@ -1291,9 +1291,269 @@ index ce46a01..2767ebc 100644
 +             written_length);
 +    }
 +  }
++
++  // XENIA-ANDROID DEBUG (domino 4): read back the resolve OUTPUT (shared memory at the dest) to see
++  // whether the resolve produced real pixels or black. max=0 => the draws/EDRAM produced nothing
++  // (domino 3 is the break); max>0 => the resolve works and the texture load is the break (domino 5).
++  {
++    static uint32_t s_ro = 0;
++    if (written_length && (s_ro++ % 180) == 0) {
++      const ui::vulkan::VulkanDevice* const vdev = GetVulkanDevice();
++      const ui::vulkan::VulkanDevice::Functions& dfn = vdev->functions();
++      const VkDevice device = vdev->device();
++      VkDeviceSize dbg_size = written_length;
++      if (dbg_size > VkDeviceSize(0x400000)) dbg_size = VkDeviceSize(0x400000);
++      VkBuffer dbg_buf = VK_NULL_HANDLE;
++      VkDeviceMemory dbg_mem = VK_NULL_HANDLE;
++      if (ui::vulkan::util::CreateDedicatedAllocationBuffer(
++              vdev, dbg_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++              ui::vulkan::util::MemoryPurpose::kReadback, dbg_buf, dbg_mem)) {
++        shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
++        VkBufferCopy region = {};
++        region.srcOffset = written_address;
++        region.dstOffset = 0;
++        region.size = dbg_size;
++        deferred_command_buffer_.CmdVkCopyBuffer(shared_memory_->buffer(),
++                                                 dbg_buf, 1, &region);
++        if (AwaitAllQueueOperationsCompletion()) {
++          void* mapped = nullptr;
++          if (dfn.vkMapMemory(device, dbg_mem, 0, dbg_size, 0, &mapped) ==
++              VK_SUCCESS) {
++            const uint8_t* p = static_cast<const uint8_t*>(mapped);
++            uint64_t sum = 0, maxv = 0;
++            for (VkDeviceSize i = 0; i < dbg_size; ++i) {
++              sum += p[i];
++              if (p[i] > maxv) maxv = p[i];
++            }
++            XELOGI("XENIA-ANDROID RESOLVE-OUTPUT@0x{:08X}: bytes={} mean={:.4f} max={} "
++                   "(max=0 => draws/EDRAM are the break; max>0 => texture-load is the break)",
++                   written_address, uint64_t(dbg_size),
++                   double(sum) / double(dbg_size) / 255.0, maxv);
++            dfn.vkUnmapMemory(device, dbg_mem);
++          }
++        }
++        dfn.vkDestroyBuffer(device, dbg_buf, nullptr);
++        dfn.vkFreeMemory(device, dbg_mem, nullptr);
++      }
++    }
++  }
++
++  // XENIA-ANDROID DEBUG (domino 3): read back the EDRAM buffer (the resolve's source) to see whether
++  // the draws wrote ANY content into EDRAM. max=0 => draws never wrote EDRAM (shaders/render-target/
++  // depth-blend is the break); max>0 => EDRAM has content but the resolve reads the wrong region.
++  {
++    static uint32_t s_ed = 0;
++    if ((s_ed++ % 240) == 0 && render_target_cache_ &&
++        render_target_cache_->edram_buffer() != VK_NULL_HANDLE) {
++      const ui::vulkan::VulkanDevice* const vdev = GetVulkanDevice();
++      const ui::vulkan::VulkanDevice::Functions& dfn = vdev->functions();
++      const VkDevice device = vdev->device();
++      VkDeviceSize edram_size = VkDeviceSize(xenos::kEdramSizeBytes);
++      VkBuffer ed_buf = VK_NULL_HANDLE;
++      VkDeviceMemory ed_mem = VK_NULL_HANDLE;
++      if (ui::vulkan::util::CreateDedicatedAllocationBuffer(
++              vdev, edram_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++              ui::vulkan::util::MemoryPurpose::kReadback, ed_buf, ed_mem)) {
++        AwaitAllQueueOperationsCompletion();
++        VkBufferCopy region = {};
++        region.srcOffset = 0;
++        region.dstOffset = 0;
++        region.size = edram_size;
++        deferred_command_buffer_.CmdVkCopyBuffer(
++            render_target_cache_->edram_buffer(), ed_buf, 1, &region);
++        if (AwaitAllQueueOperationsCompletion()) {
++          void* mapped = nullptr;
++          if (dfn.vkMapMemory(device, ed_mem, 0, edram_size, 0, &mapped) ==
++              VK_SUCCESS) {
++            const uint8_t* p = static_cast<const uint8_t*>(mapped);
++            uint64_t sum = 0, maxv = 0;
++            for (VkDeviceSize i = 0; i < edram_size; ++i) {
++              sum += p[i];
++              if (p[i] > maxv) maxv = p[i];
++            }
++            XELOGI("XENIA-ANDROID EDRAM-CONTENT: bytes={} mean={:.4f} max={} "
++                   "(max=0 => draws never wrote EDRAM [shaders/RT/depth-blend]; "
++                   "max>0 => EDRAM has content, resolve reads wrong region)",
++                   uint64_t(edram_size),
++                   double(sum) / double(edram_size) / 255.0, maxv);
++            dfn.vkUnmapMemory(device, ed_mem);
++          }
++        }
++        dfn.vkDestroyBuffer(device, ed_buf, nullptr);
++        dfn.vkFreeMemory(device, ed_mem, nullptr);
++      }
++    }
++  }
  
    // CPU readback resolve path (if not disabled).
    ReadbackResolveMode readback_mode = GetReadbackResolveMode();
+diff --git a/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc b/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc
+index 67f6d2d..405d217 100644
+--- a/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc
++++ b/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc
+@@ -28,6 +28,7 @@
+ #include "xenia/gpu/vulkan/deferred_command_buffer.h"
+ #include "xenia/gpu/vulkan/vulkan_command_processor.h"
+ #include "xenia/gpu/xenos.h"
++#include "xenia/ui/vulkan/vulkan_gpu_completion_timeline.h"
+ #include "xenia/ui/vulkan/vulkan_util.h"
+ 
+ DEFINE_string(
+@@ -6028,10 +6029,127 @@ void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
+ 
+   GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows,
+                                  dump_pitch, dump_rectangles_);
++  // XENIA-ANDROID DEBUG (domino 2): does the resolve find any render target owning this EDRAM
++  // range? 0 rectangles => the drawn render target isn't registered at dump_base (EDRAM ownership
++  // mismatch) and nothing is dumped => EDRAM stays black.
++  {
++    static uint32_t s_dr = 0;
++    if ((s_dr++ % 120) == 0) {
++      int rt0_layout = -1;
++      uint32_t rt0_fmt = 0xFFFF;
++      if (!dump_rectangles_.empty()) {
++        auto* rt0 =
++            static_cast<VulkanRenderTarget*>(dump_rectangles_[0].render_target);
++        rt0_layout = int(rt0->current_layout());
++        rt0_fmt = uint32_t(rt0->key().resource_format);
++      }
++      XELOGI("XENIA-ANDROID DUMP: dump_base={} rows={} pitch={} rectangles={} "
++             "rt0_layout={} rt0_fmt={} (layout 0=UNDEFINED=>content discarded; "
++             "2=COLOR_ATTACHMENT=ok; 0 rects => RT not found at this EDRAM base)",
++             dump_base, dump_rows, dump_pitch, uint32_t(dump_rectangles_.size()),
++             rt0_layout, rt0_fmt);
++    }
++  }
+   if (dump_rectangles_.empty()) {
+     return;
+   }
+ 
++  // XENIA-ANDROID DEBUG (domino 2 FINAL): one-shot readback of the render-target image to settle
++  // whether the draws wrote real pixels (max>0 => the dump shader misreads a good RT) or black
++  // (max=0 => the draws produce no color: pixel shader / color write mask / depth-blend).
++  {
++    static bool s_rt_done = false;
++    if (!s_rt_done) {
++      s_rt_done = true;
++      auto* rt0 =
++          static_cast<VulkanRenderTarget*>(dump_rectangles_[0].render_target);
++      VkImage rt_image = rt0->image();
++      ui::vulkan::VulkanDevice* vdev = command_processor_.GetVulkanDevice();
++      const ui::vulkan::VulkanDevice::Functions& dfn = vdev->functions();
++      VkDevice device = vdev->device();
++      const uint32_t rw = 1280, rh = 64;
++      VkDeviceSize bsize = VkDeviceSize(rw) * rh * 4;
++      VkBuffer rbuf = VK_NULL_HANDLE;
++      VkDeviceMemory rmem = VK_NULL_HANDLE;
++      VkCommandPool pool = VK_NULL_HANDLE;
++      if (ui::vulkan::util::CreateDedicatedAllocationBuffer(
++              vdev, bsize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++              ui::vulkan::util::MemoryPurpose::kReadback, rbuf, rmem)) {
++        VkCommandPoolCreateInfo cpci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
++        cpci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
++        cpci.queueFamilyIndex = vdev->queue_family_graphics_compute();
++        if (dfn.vkCreateCommandPool(device, &cpci, nullptr, &pool) ==
++            VK_SUCCESS) {
++          VkCommandBufferAllocateInfo cbai = {
++              VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
++          cbai.commandPool = pool;
++          cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
++          cbai.commandBufferCount = 1;
++          VkCommandBuffer cb = VK_NULL_HANDLE;
++          if (dfn.vkAllocateCommandBuffers(device, &cbai, &cb) == VK_SUCCESS) {
++            VkCommandBufferBeginInfo bi = {
++                VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
++            bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++            dfn.vkBeginCommandBuffer(cb, &bi);
++            VkImageMemoryBarrier ib = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
++            ib.srcAccessMask = rt0->current_access_mask();
++            ib.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++            ib.oldLayout = rt0->current_layout();
++            ib.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
++            ib.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++            ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++            ib.image = rt_image;
++            ib.subresourceRange = ui::vulkan::util::InitializeSubresourceRange(
++                VK_IMAGE_ASPECT_COLOR_BIT);
++            dfn.vkCmdPipelineBarrier(cb, rt0->current_stage_mask(),
++                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
++                                     nullptr, 0, nullptr, 1, &ib);
++            VkBufferImageCopy bic = {};
++            bic.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++            bic.imageSubresource.layerCount = 1;
++            bic.imageExtent.width = rw;
++            bic.imageExtent.height = rh;
++            bic.imageExtent.depth = 1;
++            dfn.vkCmdCopyImageToBuffer(cb, rt_image,
++                                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                                       rbuf, 1, &bic);
++            std::swap(ib.srcAccessMask, ib.dstAccessMask);
++            std::swap(ib.oldLayout, ib.newLayout);
++            dfn.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                                     rt0->current_stage_mask(), 0, 0, nullptr, 0,
++                                     nullptr, 1, &ib);
++            dfn.vkEndCommandBuffer(cb);
++            {
++              ui::vulkan::VulkanGPUCompletionTimeline tl(vdev);
++              VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
++              si.commandBufferCount = 1;
++              si.pCommandBuffers = &cb;
++              tl.AcquireFenceAndSubmit(
++                  vdev->queue_family_graphics_compute(), 0, 1, &si);
++            }
++            void* mp = nullptr;
++            if (dfn.vkMapMemory(device, rmem, 0, bsize, 0, &mp) == VK_SUCCESS) {
++              const uint8_t* p = static_cast<const uint8_t*>(mp);
++              uint64_t sum = 0, maxv = 0;
++              for (VkDeviceSize i = 0; i < bsize; ++i) {
++                sum += p[i];
++                if (p[i] > maxv) maxv = p[i];
++              }
++              XELOGI("XENIA-ANDROID RT-IMAGE-READBACK: {}x{} mean={:.4f} max={} "
++                     "(max=0 => DRAWS write a BLACK RT [pixel shader/color mask/"
++                     "depth-blend]; max>0 => DUMP shader misreads a good RT)",
++                     rw, rh, double(sum) / double(bsize) / 255.0, maxv);
++              dfn.vkUnmapMemory(device, rmem);
++            }
++          }
++          dfn.vkDestroyCommandPool(device, pool, nullptr);
++        }
++        dfn.vkDestroyBuffer(device, rbuf, nullptr);
++        dfn.vkFreeMemory(device, rmem, nullptr);
++      }
++    }
++  }
++
+   // Clear previously set temporary indices.
+   for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+     static_cast<VulkanRenderTarget*>(rectangle.render_target)
+@@ -6093,8 +6211,26 @@ void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
+     DumpPipelineKey pipeline_key = invocation.pipeline_key;
+     VkPipeline pipeline = GetDumpPipeline(pipeline_key);
+     if (!pipeline) {
++      // XENIA-ANDROID DEBUG (domino 2): a null dump pipeline silently skips the RT->EDRAM store,
++      // leaving EDRAM (and thus the whole frame) black.
++      static uint32_t s_np = 0;
++      if ((s_np++ % 60) == 0) {
++        XELOGW("XENIA-ANDROID DUMP: GetDumpPipeline returned NULL (msaa={} fmt={} depth={}) "
++               "=> RT->EDRAM dump SKIPPED => EDRAM black",
++               uint32_t(pipeline_key.msaa_samples),
++               uint32_t(pipeline_key.resource_format), pipeline_key.is_depth);
++      }
+       continue;
+     }
++    {
++      static uint32_t s_dp = 0;
++      if ((s_dp++ % 120) == 0) {
++        XELOGI("XENIA-ANDROID DUMP: dispatching RT->EDRAM (pipeline OK) src_pitch_tiles={} "
++               "dest_pitch={} fmt={} depth={}",
++               uint32_t(rt_key.GetPitchTiles()), dump_pitch,
++               uint32_t(pipeline_key.resource_format), pipeline_key.is_depth);
++      }
++    }
+     command_processor_.BindExternalComputePipeline(pipeline);
+ 
+     VkPipelineLayout pipeline_layout = rt_key.is_depth
 diff --git a/src/xenia/gpu/vulkan/vulkan_texture_cache.cc b/src/xenia/gpu/vulkan/vulkan_texture_cache.cc
 index b7224ed..fe5749f 100644
 --- a/src/xenia/gpu/vulkan/vulkan_texture_cache.cc
