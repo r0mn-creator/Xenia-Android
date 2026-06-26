@@ -139,6 +139,22 @@ public class EmulatorActivity extends WindowedAppActivity {
             cvars.putString("content_root", storageRoot + "/content");
             cvars.putString("cache_root",   storageRoot + "/cache");
         }
+
+        // XENIA-ANDROID: apply the custom GPU driver selected in Settings (if any). The adrenotools
+        // loader needs the driver dir (internal/exec), the hook libs (our native lib dir), and a
+        // writable+exec temp dir. Empty = use the system libvulkan.so.
+        final SharedPreferences sprefs = getSharedPreferences(SettingsActivity.PREFS, MODE_PRIVATE);
+        final String drvDir  = sprefs.getString(DriverManager.PREF_DRIVER_DIR, "");
+        final String drvName = sprefs.getString(DriverManager.PREF_DRIVER_NAME, "");
+        if (!drvDir.isEmpty() && !drvName.isEmpty()) {
+            cvars.putString("custom_gpu_driver_dir", drvDir);
+            cvars.putString("custom_gpu_driver_name", drvName);
+            cvars.putString("gpu_driver_hook_dir", getApplicationInfo().nativeLibraryDir);
+            final java.io.File tmp = new java.io.File(getCodeCacheDir(), "gpu_driver");
+            //noinspection ResultOfMethodCallIgnored
+            tmp.mkdirs();
+            cvars.putString("gpu_driver_tmp_dir", tmp.getAbsolutePath());
+        }
         intent.putExtra(EXTRA_CVARS, cvars);
 
         super.onCreate(savedInstanceState);

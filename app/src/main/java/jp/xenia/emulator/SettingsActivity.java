@@ -14,6 +14,8 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.TextView;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.SwitchCompat;
@@ -45,6 +47,29 @@ public class SettingsActivity extends AppCompatActivity {
     };
     static final int RESOLUTION_DEFAULT = 2; // 720p
 
+    // SAF picker for importing a custom GPU driver (.zip). Registered at construction so it's
+    // ready before the activity starts.
+    private final ActivityResultLauncher<String[]> mDriverPicker =
+            registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
+                if (uri == null) return;
+                Snackbar.make(findViewById(android.R.id.content),
+                        "Importing driver…", Snackbar.LENGTH_SHORT).show();
+                new Thread(() -> {
+                    try {
+                        final DriverManager.Driver d = DriverManager.importZip(this, uri);
+                        DriverManager.select(getSharedPreferences(PREFS, MODE_PRIVATE), d);
+                        runOnUiThread(() -> {
+                            Snackbar.make(findViewById(android.R.id.content),
+                                    "Driver added: " + d.label, Snackbar.LENGTH_LONG).show();
+                            recreate();
+                        });
+                    } catch (Exception e) {
+                        runOnUiThread(() -> Snackbar.make(findViewById(android.R.id.content),
+                                "Import failed: " + e.getMessage(), Snackbar.LENGTH_LONG).show());
+                    }
+                }).start();
+            });
+
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -62,6 +87,12 @@ public class SettingsActivity extends AppCompatActivity {
     private List<SettingItem> buildSettings() {
         final SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         final List<SettingItem> items = new ArrayList<>();
+
+        // Graphics Driver — custom Adreno (Mesa Turnip) Vulkan drivers. At the top for now.
+        items.add(new SettingItem("Graphics Driver", null, SettingItem.TYPE_HEADER));
+        items.add(new SettingItem("GPU Driver",
+                DriverManager.currentLabel(prefs),
+                this::showDriverPicker));
 
         // Appearance
         items.add(new SettingItem("Appearance", null, SettingItem.TYPE_HEADER));
@@ -140,6 +171,46 @@ public class SettingsActivity extends AppCompatActivity {
                 "Warning", SettingItem.TYPE_VALUE, "log_level", false, prefs));
 
         return items;
+    }
+
+    // -------------------------------------------------------------------------
+    // Custom GPU driver picker
+    // -------------------------------------------------------------------------
+
+    private void showDriverPicker() {
+        final SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        final List<DriverManager.Driver> drivers = DriverManager.list(this);
+
+        final List<String> labels = new ArrayList<>();
+        labels.add(DriverManager.SYSTEM_LABEL);
+        for (DriverManager.Driver d : drivers) labels.add(d.label);
+        labels.add("Add driver (.zip)…");
+
+        final String current = DriverManager.currentLabel(prefs);
+        int sel = 0; // System default
+        for (int i = 0; i < drivers.size(); i++) {
+            if (drivers.get(i).label.equals(current)) { sel = i + 1; break; }
+        }
+
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("GPU Driver")
+                .setSingleChoiceItems(labels.toArray(new String[0]), sel, (dialog, which) -> {
+                    if (which == 0) {
+                        DriverManager.selectSystem(prefs);
+                        dialog.dismiss();
+                        recreate();
+                    } else if (which == labels.size() - 1) {
+                        dialog.dismiss();
+                        mDriverPicker.launch(new String[]{"application/zip",
+                                "application/x-zip-compressed", "application/octet-stream", "*/*"});
+                    } else {
+                        DriverManager.select(prefs, drivers.get(which - 1));
+                        dialog.dismiss();
+                        recreate();
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     // -------------------------------------------------------------------------
