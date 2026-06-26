@@ -1177,7 +1177,7 @@ index 3f70a20..2e20533 100644
  
    uint32_t page_first = physical_address_start >> page_size_log2_;
 diff --git a/src/xenia/gpu/vulkan/vulkan_command_processor.cc b/src/xenia/gpu/vulkan/vulkan_command_processor.cc
-index ce46a01..86845af 100644
+index ce46a01..0895dfd 100644
 --- a/src/xenia/gpu/vulkan/vulkan_command_processor.cc
 +++ b/src/xenia/gpu/vulkan/vulkan_command_processor.cc
 @@ -1385,13 +1385,19 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
@@ -1279,7 +1279,35 @@ index ce46a01..86845af 100644
    if (pixel_shader && pixel_shader->memexport_eM_written() != 0 &&
        device_properties.fragmentStoresAndAtomics) {
      draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
-@@ -2937,6 +2984,107 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -2521,6 +2568,27 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
+       pixel_shader ? draw_util::GetNormalizedColorMask(
+                          regs, pixel_shader->writes_color_targets())
+                    : 0;
++  // XENIA-ANDROID DEBUG (domino 1): focus on the COLOR-WRITING draws (mask != 0). Where do they
++  // render (color_base) and do they sample textures? If they target the resolved RT and still
++  // leave it black, the color values are black (textures not loaded / shader). If they target a
++  // different base, they render elsewhere than what's displayed.
++  {
++    static uint32_t s_color = 0, s_nocolor = 0;
++    if (normalized_color_mask != 0) {
++      if ((s_color++ % 200) == 0) {
++        uint32_t color_base = regs.Get<reg::RB_COLOR_INFO>().color_base;
++        uint32_t tex_count =
++            pixel_shader ? uint32_t(pixel_shader->texture_bindings().size()) : 0;
++        XELOGI("XENIA-ANDROID COLORDRAW #{} (nocolor_so_far={}): mask=0x{:X} "
++               "color_base={} textures={} ps_writes_color=0x{:X} z_enable={}",
++               s_color, s_nocolor, normalized_color_mask, color_base, tex_count,
++               pixel_shader ? pixel_shader->writes_color_targets() : uint32_t(0),
++               uint32_t(normalized_depth_control.z_enable));
++      }
++    } else {
++      ++s_nocolor;
++    }
++  }
+   if (!render_target_cache_->Update(is_rasterization_done,
+                                     normalized_depth_control,
+                                     normalized_color_mask, *vertex_shader)) {
+@@ -2937,6 +3005,107 @@ bool VulkanCommandProcessor::IssueCopy() {
                                       written_address, written_length)) {
      return false;
    }
@@ -1555,7 +1583,7 @@ index 67f6d2d..405d217 100644
  
      VkPipelineLayout pipeline_layout = rt_key.is_depth
 diff --git a/src/xenia/gpu/vulkan/vulkan_texture_cache.cc b/src/xenia/gpu/vulkan/vulkan_texture_cache.cc
-index b7224ed..fe5749f 100644
+index b7224ed..2b7bcea 100644
 --- a/src/xenia/gpu/vulkan/vulkan_texture_cache.cc
 +++ b/src/xenia/gpu/vulkan/vulkan_texture_cache.cc
 @@ -933,6 +933,15 @@ VkImageView VulkanTextureCache::RequestSwapTexture(
@@ -1574,6 +1602,24 @@ index b7224ed..fe5749f 100644
    VulkanTexture* texture =
        static_cast<VulkanTexture*>(FindOrCreateTexture(key));
    if (!texture) {
+@@ -1186,6 +1195,17 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+   const FormatInfo* guest_format_info = FormatInfo::Get(guest_format);
+   uint32_t block_width = guest_format_info->block_width;
+   uint32_t block_height = guest_format_info->block_height;
++
++  // XENIA-ANDROID DEBUG (domino 0): log loaded texture source addresses so the guest memory can be
++  // inspected for whether the game's textures are actually present (vs all-black = not streamed).
++  {
++    static uint32_t s_tx = 0;
++    if ((s_tx++ % 100) == 0) {
++      XELOGI("XENIA-ANDROID TEXLOAD #{}: base_page=0x{:X} guest_addr=0x{:08X} {}x{} fmt={}",
++             s_tx, texture_key.base_page, uint32_t(texture_key.base_page) << 12,
++             width, height, uint32_t(guest_format));
++    }
++  }
+   uint32_t bytes_per_block = guest_format_info->bytes_per_block();
+   uint32_t level_first = load_base ? 0 : 1;
+   uint32_t level_last = load_mips ? texture_key.mip_max_level : 0;
 diff --git a/src/xenia/hid/android/CMakeLists.txt b/src/xenia/hid/android/CMakeLists.txt
 new file mode 100644
 index 0000000..e1406a8
