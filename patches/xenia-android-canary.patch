@@ -1125,6 +1125,57 @@ index 8f8519f..ada2ad2 100644
    if (COMMAND_PROCESSOR::GetCurrentRingReadCount() >=
        count * sizeof(uint32_t)) {
      // To handle nesting behavior when tracing we special case indirect buffers.
+diff --git a/src/xenia/gpu/shared_memory.cc b/src/xenia/gpu/shared_memory.cc
+index 3f70a20..2e20533 100644
+--- a/src/xenia/gpu/shared_memory.cc
++++ b/src/xenia/gpu/shared_memory.cc
+@@ -286,6 +286,14 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
+     return;
+   }
+   length = std::min(length, kBufferSize - start);
++  // XENIA-ANDROID DEBUG: resolve marks the swap frontbuffer slot GPU-written (should stop re-upload).
++  if (start <= 0x08528000u && 0x08528000u < uint64_t(start) + length) {
++    static int swn = 0;
++    if ((swn++ % 60) == 0) {
++      XELOGI("XENIA-ANDROID[swap] RangeWrittenByGpu start=0x{:X} len=0x{:X} (marks valid+gpu_written)",
++             start, length);
++    }
++  }
+   uint32_t end = start + length - 1;
+   uint32_t page_first = start >> page_size_log2_;
+   uint32_t page_last = end >> page_size_log2_;
+@@ -409,6 +417,15 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
+     uploads[current_upload_range++] =
+         (std::make_pair(range_start, page_last + 1 - range_start));
+   }
++  // XENIA-ANDROID DEBUG: detect re-upload (black-clobber) of the swap frontbuffer slot.
++  if (start <= 0x08528000u && 0x08528000u < uint64_t(start) + length) {
++    static int swn = 0;
++    if ((swn++ % 60) == 0) {
++      XELOGI("XENIA-ANDROID[swap] RequestRange start=0x{:X} len=0x{:X} upload_ranges={} "
++             "(>0 => RE-UPLOAD black clobbers resolve)",
++             start, length, current_upload_range);
++    }
++  }
+   if (!current_upload_range) {
+     return true;
+   }
+@@ -517,6 +534,15 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+     return std::make_pair(uint32_t(0), UINT32_MAX);
+   }
+   length = std::min(length, kBufferSize - physical_address_start);
++  // XENIA-ANDROID DEBUG: CPU write invalidates guest memory — does it hit the swap frontbuffer slot?
++  if (physical_address_start <= 0x08528000u &&
++      0x08528000u < uint64_t(physical_address_start) + length) {
++    static int swn = 0;
++    if ((swn++ % 60) == 0) {
++      XELOGI("XENIA-ANDROID[swap] MemoryInvalidationCallback (CPU write) start=0x{:X} len=0x{:X} exact={}",
++             physical_address_start, length, exact_range);
++    }
++  }
+   uint32_t physical_address_last = physical_address_start + (length - 1);
+ 
+   uint32_t page_first = physical_address_start >> page_size_log2_;
 diff --git a/src/xenia/gpu/vulkan/vulkan_command_processor.cc b/src/xenia/gpu/vulkan/vulkan_command_processor.cc
 index ce46a01..2767ebc 100644
 --- a/src/xenia/gpu/vulkan/vulkan_command_processor.cc
