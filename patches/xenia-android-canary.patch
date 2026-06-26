@@ -1243,6 +1243,26 @@ index ce46a01..2767ebc 100644
  
    // CPU readback resolve path (if not disabled).
    ReadbackResolveMode readback_mode = GetReadbackResolveMode();
+diff --git a/src/xenia/gpu/vulkan/vulkan_texture_cache.cc b/src/xenia/gpu/vulkan/vulkan_texture_cache.cc
+index b7224ed..fe5749f 100644
+--- a/src/xenia/gpu/vulkan/vulkan_texture_cache.cc
++++ b/src/xenia/gpu/vulkan/vulkan_texture_cache.cc
+@@ -933,6 +933,15 @@ VkImageView VulkanTextureCache::RequestSwapTexture(
+       key.dimension != xenos::DataDimension::k2DOrStacked) {
+     return nullptr;
+   }
++  // XENIA-ANDROID DEBUG: log the frontbuffer source address so it can be compared against the
++  // "Resolve WROTE" destinations — to see whether the swap reads where the game resolved the
++  // final image (address match) vs an un-resolved (black) location.
++  static int s_swapfetch_n = 0;
++  if ((++s_swapfetch_n % 120) == 0) {
++    XELOGI("XENIA-ANDROID SWAP fetch: base_page=0x{:X} guest_addr=0x{:08X} {}x{} fmt={}",
++           key.base_page, uint32_t(key.base_page) << 12, key.GetWidth(),
++           key.GetHeight(), uint32_t(key.format));
++  }
+   VulkanTexture* texture =
+       static_cast<VulkanTexture*>(FindOrCreateTexture(key));
+   if (!texture) {
 diff --git a/src/xenia/hid/android/CMakeLists.txt b/src/xenia/hid/android/CMakeLists.txt
 new file mode 100644
 index 0000000..e1406a8
@@ -2248,7 +2268,7 @@ index 385963a..00d7bf0 100644
    dialog_loop_next_index_ = 0;
    while (dialog_loop_next_index_ < dialogs_.size()) {
 diff --git a/src/xenia/ui/presenter.cc b/src/xenia/ui/presenter.cc
-index d53a081..06911c2 100644
+index d53a081..121b4b3 100644
 --- a/src/xenia/ui/presenter.cc
 +++ b/src/xenia/ui/presenter.cc
 @@ -9,6 +9,9 @@
@@ -2303,7 +2323,7 @@ index d53a081..06911c2 100644
    // May be called by the implementations only when requested.
    assert_true(is_in_ui_thread_paint_);
    // Drawers can add or remove drawers (including themselves), need to ensure
-@@ -1271,11 +1295,38 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
+@@ -1271,11 +1295,68 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
  #endif  // XE_PLATFORM
  }
  
@@ -2337,6 +2357,36 @@ index d53a081..06911c2 100644
 +             g_presented_fps.load(std::memory_order_relaxed));
 +      s_fps_count = 0;
 +      s_fps_start = fps_now;
++    }
++  }
++  // XENIA-ANDROID DEBUG: periodically capture the guest-output image and log its mean/max
++  // brightness, to determine whether the black screen is black AT THE GPU SOURCE (the guest
++  // output image content itself is black) or only lost later during compositing/present.
++  if (result == PaintResult::kPresented ||
++      result == PaintResult::kPresentedSuboptimal) {
++    static int s_cap_n = 0;
++    if ((++s_cap_n % 300) == 0) {
++      RawImage img;
++      if (CaptureGuestOutput(img) && !img.data.empty()) {
++        uint64_t sum = 0, maxv = 0, cnt = 0;
++        for (uint32_t y = 0; y < img.height; ++y) {
++          const uint8_t* row = img.data.data() + size_t(y) * img.stride;
++          for (uint32_t x = 0; x < img.width; ++x) {
++            const uint8_t r = row[x * 4], g = row[x * 4 + 1], b = row[x * 4 + 2];
++            sum += uint64_t(r) + g + b;
++            if (r > maxv) maxv = r;
++            if (g > maxv) maxv = g;
++            if (b > maxv) maxv = b;
++            cnt += 3;
++          }
++        }
++        XELOGI("XENIA-ANDROID GUEST-OUTPUT CAPTURE: {}x{} mean={:.4f} max={} "
++               "(mean~0 => black at GPU source; else present loses it)",
++               img.width, img.height,
++               cnt ? double(sum) / double(cnt) / 255.0 : -1.0, maxv);
++      } else {
++        XELOGW("XENIA-ANDROID GUEST-OUTPUT CAPTURE: failed / empty");
++      }
 +    }
 +  }
    switch (result) {
