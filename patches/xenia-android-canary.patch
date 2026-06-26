@@ -1126,7 +1126,7 @@ index 8f8519f..ada2ad2 100644
        count * sizeof(uint32_t)) {
      // To handle nesting behavior when tracing we special case indirect buffers.
 diff --git a/src/xenia/gpu/shared_memory.cc b/src/xenia/gpu/shared_memory.cc
-index 3f70a20..2e20533 100644
+index 3f70a20..49006f0 100644
 --- a/src/xenia/gpu/shared_memory.cc
 +++ b/src/xenia/gpu/shared_memory.cc
 @@ -286,6 +286,14 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
@@ -1160,17 +1160,19 @@ index 3f70a20..2e20533 100644
    if (!current_upload_range) {
      return true;
    }
-@@ -517,6 +534,15 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+@@ -517,6 +534,17 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
      return std::make_pair(uint32_t(0), UINT32_MAX);
    }
    length = std::min(length, kBufferSize - physical_address_start);
-+  // XENIA-ANDROID DEBUG: CPU write invalidates guest memory — does it hit the swap frontbuffer slot?
-+  if (physical_address_start <= 0x08528000u &&
-+      0x08528000u < uint64_t(physical_address_start) + length) {
-+    static int swn = 0;
-+    if ((swn++ % 60) == 0) {
-+      XELOGI("XENIA-ANDROID[swap] MemoryInvalidationCallback (CPU write) start=0x{:X} len=0x{:X} exact={}",
-+             physical_address_start, length, exact_range);
++  // XENIA-ANDROID DEBUG: does the CPU-write watch fire AT ALL, and does it ever cover the texture
++  // 0x0B838000? If this never logs, the write-watch (mprotect/SIGSEGV) isn't working on Android.
++  {
++    static uint32_t s_inv = 0;
++    bool covers_tex = (physical_address_start <= 0x0B838000u &&
++                       0x0B838000u < uint64_t(physical_address_start) + length);
++    if ((s_inv++ % 1000) == 0 || covers_tex) {
++      XELOGI("XENIA-ANDROID INVALIDATION #{}: addr=0x{:08X} len=0x{:X} covers_texture={}",
++             s_inv, physical_address_start, length, covers_tex);
 +    }
 +  }
    uint32_t physical_address_last = physical_address_start + (length - 1);
@@ -2280,6 +2282,27 @@ index fdfa33c..7e78fb1 100644
    std::replace_if(
        name.begin(), name.end(), [](auto c) { return c < 32 || c > 127; }, '?');
  
+diff --git a/src/xenia/kernel/xboxkrnl/xboxkrnl_io.cc b/src/xenia/kernel/xboxkrnl/xboxkrnl_io.cc
+index bed9436..563407a 100644
+--- a/src/xenia/kernel/xboxkrnl/xboxkrnl_io.cc
++++ b/src/xenia/kernel/xboxkrnl/xboxkrnl_io.cc
+@@ -173,6 +173,16 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
+       signal_event = true;
+ 
+       if (XSUCCEEDED(result)) {
++        // XENIA-ANDROID: a file read writes guest memory via a host copy that bypasses the GPU's
++        // page-fault write-watch, so the GPU's shared-memory copy of streamed data (textures,
++        // vertices) stays stale/empty and the game renders black. Notify the memory system the
++        // range was written so the GPU re-uploads it and the texture cache reloads it.
++        if (buffer.guest_address() && buffer_length) {
++          auto global_lock = xe::global_critical_region::AcquireDirect();
++          kernel_memory()->TriggerPhysicalMemoryCallbacks(
++              std::move(global_lock), buffer.guest_address(), buffer_length,
++              true, false, false);
++        }
+         if (auto patch = kernel_state()->xmp_volume_patch()) {
+           auto host_buf =
+               kernel_memory()->TranslateVirtual(buffer.guest_address());
 diff --git a/src/xenia/kernel/xboxkrnl/xboxkrnl_threading.cc b/src/xenia/kernel/xboxkrnl/xboxkrnl_threading.cc
 index e63a28d..51e1492 100644
 --- a/src/xenia/kernel/xboxkrnl/xboxkrnl_threading.cc
